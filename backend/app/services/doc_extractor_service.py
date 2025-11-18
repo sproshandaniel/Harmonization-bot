@@ -1,6 +1,6 @@
 import io
 from fastapi import UploadFile
-from app.services.extractor_service import extract_rule_pipeline
+from backend.app.services.extractor_service import extract_rule_pipeline
 
 # simple PDF text reader using PyMuPDF (install with: pip install PyMuPDF)
 import fitz  
