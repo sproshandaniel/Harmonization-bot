@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Form
 from pydantic import BaseModel
-from backend.app.services.extractor_service import extract_rule_pipeline
+from app.services.extractor_service import extract_rule_pipeline
 
 router = APIRouter()
 

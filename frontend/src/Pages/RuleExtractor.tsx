@@ -38,10 +38,16 @@ type RuleResult = {
   _id?: string;
 };
 
+type Project = {
+  id: string;
+  name: string;
+  description?: string;
+};
+
 export default function RuleExtractor() {
   const [text, setText] = useState("");
   const [file, setFile] = useState<File | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(false); // extraction loading
   const [results, setResults] = useState<RuleResult[]>([]);
   const [pack, setPack] = useState<string>("abap-core-standards");
   const [filter, setFilter] = useState<{ category?: string; q?: string }>({});
@@ -49,6 +55,12 @@ export default function RuleExtractor() {
   const [rulePackOptions, setRulePackOptions] = useState<string[]>([]);
   const [rulePack, setRulePack] = useState<string>("");
   const [user, setUser] = useState<string>("Architect User");
+
+  // NEW: project state
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string>("");
+  const [loadingProjects, setLoadingProjects] = useState(false);
+  const [loadingProjectRules, setLoadingProjectRules] = useState(false);
 
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorIdx, setEditorIdx] = useState<number | null>(null);
@@ -58,9 +70,7 @@ export default function RuleExtractor() {
 
   const filtered = useMemo(() => {
     return results.filter((r) => {
-      const matchesCat = filter.category
-        ? r.category === filter.category
-        : true;
+      const matchesCat = filter.category ? r.category === filter.category : true;
       const matchesQuery = filter.q
         ? r.yaml.toLowerCase().includes(filter.q.toLowerCase())
         : true;
@@ -68,7 +78,72 @@ export default function RuleExtractor() {
     });
   }, [results, filter]);
 
+  const selectedProject = useMemo(
+    () => projects.find((p) => p.id === selectedProjectId) || null,
+    [projects, selectedProjectId]
+  );
+
+  // --------- NEW: load projects on mount ----------
+  useEffect(() => {
+    const loadProjects = async () => {
+      try {
+        setLoadingProjects(true);
+        const res = await fetch("/api/projects");
+        if (!res.ok) {
+          throw new Error(`Failed to load projects (${res.status})`);
+        }
+        const data: Project[] = await res.json();
+        setProjects(data || []);
+        if (data && data.length > 0) {
+          setSelectedProjectId(data[0].id);
+        }
+      } catch (err) {
+        console.error("Error loading projects", err);
+      } finally {
+        setLoadingProjects(false);
+      }
+    };
+    loadProjects();
+  }, []);
+
+  // --------- NEW: load rules when project changes ----------
+  useEffect(() => {
+    const loadRulesForProject = async () => {
+      if (!selectedProjectId) {
+        setResults([]);
+        return;
+      }
+      try {
+        setLoadingProjectRules(true);
+        const res = await fetch(`/api/projects/${selectedProjectId}/rules`);
+        if (!res.ok) {
+          throw new Error(`Failed to load rules for project (${res.status})`);
+        }
+        const data = await res.json();
+        // assuming API returns { rules: [...] } or just [...]
+        const rawRules: RuleResult[] = Array.isArray(data)
+          ? data
+          : data.rules || [];
+        const tagged = rawRules.map(tagDerived);
+        setResults(tagged.map((r) => ({ status: "approved", ...r })));
+      } catch (err) {
+        console.error("Error loading project rules", err);
+        // do not wipe previous results if fetch fails
+      } finally {
+        setLoadingProjectRules(false);
+      }
+    };
+
+    loadRulesForProject();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedProjectId]);
+
   async function extractRules() {
+    if (!selectedProjectId) {
+      alert("Please select a project before extracting rules.");
+      return;
+    }
+
     setLoading(true);
     try {
       const form = new FormData();
@@ -77,6 +152,8 @@ export default function RuleExtractor() {
       form.append("rule_type", ruleType);
       form.append("rule_pack", rulePack);
       form.append("created_by", user);
+      // NEW: associate extraction with project
+      form.append("project_id", selectedProjectId);
 
       const res = await fetch(
         file ? "/api/extract-from-document" : "/api/extract-rule",
@@ -170,6 +247,8 @@ export default function RuleExtractor() {
         body: JSON.stringify({
           name: pack,
           status: "draft",
+          // you might also want to send project_id here if packs are per-project
+          project_id: selectedProjectId || undefined,
           rules: approved.map((r) => {
             try {
               return yaml.load(r.yaml);
@@ -211,7 +290,33 @@ export default function RuleExtractor() {
             <span>Rule Extraction</span>
           </div>
 
+          {/* NEW: Project selector */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-1">
+                Project
+              </label>
+              <select
+                value={selectedProjectId}
+                onChange={(e) => setSelectedProjectId(e.target.value)}
+                className="border rounded w-full px-2 py-1 text-sm text-gray-700 focus:ring-2 focus:ring-indigo-500"
+              >
+                <option value="">
+                  {loadingProjects ? "Loading projects…" : "Select a project"}
+                </option>
+                {projects.map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.name}
+                  </option>
+                ))}
+              </select>
+              {selectedProject && selectedProject.description && (
+                <p className="mt-1 text-xs text-gray-500 line-clamp-2">
+                  {selectedProject.description}
+                </p>
+              )}
+            </div>
+
             <div>
               <label className="block text-sm font-semibold text-gray-700 mb-1">
                 Select Rule Type
@@ -228,6 +333,9 @@ export default function RuleExtractor() {
                 <option value="template">Template</option>
               </select>
             </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-semibold text-gray-700 mb-1">
                 Select Rule Pack
@@ -244,6 +352,16 @@ export default function RuleExtractor() {
                   </option>
                 ))}
               </select>
+            </div>
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-1">
+                User
+              </label>
+              <input
+                className="border rounded w-full px-2 py-1 text-sm text-gray-700 focus:ring-2 focus:ring-indigo-500"
+                value={user}
+                onChange={(e) => setUser(e.target.value)}
+              />
             </div>
           </div>
 
@@ -291,7 +409,7 @@ export default function RuleExtractor() {
 
           <button
             onClick={extractRules}
-            disabled={loading || (!text && !file)}
+            disabled={loading || (!text && !file) || !selectedProjectId}
             className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-60"
           >
             <Wand2 size={16} />
@@ -306,8 +424,18 @@ export default function RuleExtractor() {
               <FileText size={18} />
               <span className="font-semibold">Extracted Rules</span>
               <span className="text-sm text-gray-500">
-                ({results.filter((r) => r.status !== "discarded").length})
+                ({filtered.length})
               </span>
+              {selectedProject && (
+                <span className="ml-2 text-xs text-gray-500">
+                  for project: <strong>{selectedProject.name}</strong>
+                </span>
+              )}
+              {loadingProjectRules && (
+                <span className="ml-2 text-xs text-indigo-500">
+                  Loading project rules…
+                </span>
+              )}
             </div>
             <div className="flex items-center gap-2">
               <div className="flex items-center gap-2 border rounded px-2 py-1 bg-white">
@@ -340,9 +468,112 @@ export default function RuleExtractor() {
             </div>
           </div>
 
-          {/* Rules grid ... same as before */}
+          {/* Rules grid */}
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-            {/* ...cards mapping... */}
+            {filtered.map((rule, idx) => {
+              const isExpanded = expanded.has(idx);
+              return (
+                <div
+                  key={idx}
+                  className="border rounded-lg bg-white shadow-sm flex flex-col"
+                >
+                  <div className="flex items-center justify-between px-4 py-2 border-b bg-gray-50">
+                    <div className="flex items-center gap-2 text-sm">
+                      <span className="font-semibold">
+                        {rule._id || `Rule ${idx + 1}`}
+                      </span>
+                      {rule._severity && (
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700">
+                          {rule._severity}
+                        </span>
+                      )}
+                      {rule.category && (
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700">
+                          {rule.category}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`text-xs px-2 py-0.5 rounded-full ${
+                          rule.status === "approved"
+                            ? "bg-green-100 text-green-700"
+                            : rule.status === "edited"
+                            ? "bg-yellow-100 text-yellow-700"
+                            : rule.status === "discarded"
+                            ? "bg-gray-200 text-gray-600"
+                            : "bg-blue-100 text-blue-700"
+                        }`}
+                      >
+                        {rule.status || "new"}
+                      </span>
+                      <button
+                        onClick={() => {
+                          setExpanded((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(idx)) next.delete(idx);
+                            else next.add(idx);
+                            return next;
+                          });
+                        }}
+                        className="text-xs text-gray-500 hover:text-gray-700"
+                      >
+                        {isExpanded ? "Collapse" : "Expand"}
+                      </button>
+                    </div>
+                  </div>
+
+                  {isExpanded && (
+                    <div className="p-4 space-y-3">
+                      <pre className="bg-gray-900 text-gray-100 text-xs rounded p-3 overflow-auto max-h-64">
+                        {rule.yaml}
+                      </pre>
+                      {rule.source_snippet && (
+                        <div className="text-xs text-gray-600">
+                          <div className="font-semibold mb-1">
+                            Source snippet:
+                          </div>
+                          <pre className="bg-gray-50 border rounded p-2 max-h-32 overflow-auto">
+                            {rule.source_snippet}
+                          </pre>
+                        </div>
+                      )}
+                      <div className="flex items-center justify-between">
+                        <div className="text-xs text-gray-500">
+                          Confidence:{" "}
+                          <span className="font-semibold">
+                            {(rule.confidence * 100).toFixed(1)}%
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => openEditor(idx)}
+                            className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded border hover:bg-gray-50"
+                          >
+                            <Edit3 size={14} />
+                            Edit YAML
+                          </button>
+                          <button
+                            onClick={() => approveRule(idx)}
+                            className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-green-600 text-white hover:bg-green-700"
+                          >
+                            <Check size={14} />
+                            Approve
+                          </button>
+                          <button
+                            onClick={() => discardRule(idx)}
+                            className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-red-50 text-red-600 hover:bg-red-100"
+                          >
+                            <X size={14} />
+                            Discard
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </main>
       </div>

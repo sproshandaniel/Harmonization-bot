@@ -1,17 +1,19 @@
 import { BrowserRouter as Router, Routes, Route, Link } from "react-router-dom";
-import { Home, Settings, BarChart2, FileText } from "lucide-react";
+import { Home, Settings, BarChart2, FileText,FolderKanban } from "lucide-react";
 import Dashboard from "./Pages/Dashboard";
 import RulePacks from "./Pages/RulePacks";
 import Analytics from "./Pages/Analytics";
 import SettingsPage from "./Pages/Settings";
+import ProjectsPage from "./Pages/ProjectsPage";
 
 export default function App() {
   const navItems = [
-    { name: "Dashboard", path: "/", icon: <Home size={18} /> },
-    { name: "Rule Packs", path: "/rule-packs", icon: <FileText size={18} /> },
-    { name: "Analytics", path: "/analytics", icon: <BarChart2 size={18} /> },
-    { name: "Settings", path: "/settings", icon: <Settings size={18} /> },
-  ];
+  { name: "Dashboard", path: "/", icon: <Home size={18} /> },
+  { name: "Projects", path: "/projects", icon: <FolderKanban size={18} /> }, // ⭐ NEW MENU ITEM
+  { name: "Rule Packs", path: "/rule-packs", icon: <FileText size={18} /> },
+  { name: "Analytics", path: "/analytics", icon: <BarChart2 size={18} /> },
+  { name: "Settings", path: "/settings", icon: <Settings size={18} /> },
+];
 
   return (
     <Router>
@@ -60,6 +62,7 @@ export default function App() {
               <Route path="/rule-packs" element={<RulePacks />} />
               <Route path="/analytics" element={<Analytics />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/projects" element={<ProjectsPage />} />
             </Routes>
           </section>
         </main>
