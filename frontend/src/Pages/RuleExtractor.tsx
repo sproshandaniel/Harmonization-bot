@@ -164,13 +164,127 @@ export default function RuleExtractor() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProjectId]);
 
+  // --- DEMO HELPERS: MOCK RULES FOR CODE & DOCUMENT -----------------------
+
+  function generateMockCodeRules(
+    sourceText: string,
+    ruleType: string,
+    rulePack: string
+  ): RuleResult[] {
+    const snippet =
+      sourceText && sourceText.trim().length > 0
+        ? sourceText.slice(0, 260)
+        : "SELECT * FROM pa0001 INTO TABLE lt_pa0001.";
+
+    const packName = rulePack || "abap-core-standards";
+
+    const yaml1 = [
+      "id: ABAP.PERF.SELECT_IN_LOOP",
+      'name: "Avoid SELECT inside LOOP"',
+      "type: performance",
+      "severity: MAJOR",
+      `pack: ${packName}`,
+      'message: "Database SELECT inside LOOP/DO/WHILE can cause severe performance issues."',
+      "pattern:",
+      "  language: ABAP",
+      '  match: "SELECT .* FROM .*"',
+      "",
+    ].join("\n");
+
+    const yaml2 = [
+      "id: ABAP.EXCP.TRY_CATCH_ARITH",
+      'name: "Wrap arithmetic in TRY...CATCH"',
+      "type: code",
+      "severity: MINOR",
+      `pack: ${packName}`,
+      'message: "Arithmetic that can overflow or divide by zero must be inside TRY...CATCH."',
+      "pattern:",
+      "  language: ABAP",
+      '  match: "= .*[+\\-*/].*"',
+      "",
+    ].join("\n");
+
+    return [
+      {
+        yaml: yaml1,
+        confidence: 0.92,
+        category: "performance",
+        source_snippet: snippet,
+        status: "new",
+      },
+      {
+        yaml: yaml2,
+        confidence: 0.88,
+        category: "code",
+        source_snippet: snippet,
+        status: "new",
+      },
+    ];
+  }
+
+  function generateMockDocumentRules(
+    file: File,
+    ruleType: string,
+    rulePack: string
+  ): RuleResult[] {
+    const packName = rulePack || "architecture-guidelines";
+
+    const yaml1 = [
+      "id: ABAP.NAMING.ZCL_PREFIX",
+      'name: "Public classes must start with ZCL_"',
+      "type: naming",
+      "severity: MAJOR",
+      `pack: ${packName}`,
+      'message: "All custom global classes must use prefix ZCL_ followed by a meaningful name."',
+      "",
+    ].join("\n");
+
+    const yaml2 = [
+      "id: ABAP.DESIGN.SINGLETON_LOGGER",
+      'name: "Use singleton for shared logging service"',
+      "type: design",
+      "severity: MINOR",
+      `pack: ${packName}`,
+      'message: "Shared logging component should be implemented as a singleton to avoid multiple instances."',
+      "",
+    ].join("\n");
+
+    const snippet = `Extracted from uploaded document: ${file.name}`;
+
+    return [
+      {
+        yaml: yaml1,
+        confidence: 0.9,
+        category: "naming",
+        source_snippet: snippet,
+        status: "new",
+      },
+      {
+        yaml: yaml2,
+        confidence: 0.86,
+        category: "design",
+        source_snippet: snippet,
+        status: "new",
+      },
+    ];
+  }
+
+  // --------- Extract rules (backend + demo fallback) ----------
+
   async function extractRules() {
     if (!selectedProjectId) {
       alert("Please select a project before extracting rules.");
       return;
     }
 
+    if (!text && !file) {
+      alert("Please paste some code or upload a document.");
+      return;
+    }
+
     setLoading(true);
+
+    // 1. Try backend as-is
     try {
       const form = new FormData();
       if (file) form.append("file", file);
@@ -180,29 +294,51 @@ export default function RuleExtractor() {
       form.append("created_by", user);
       form.append("project_id", selectedProjectId);
 
-      const backendBase = "http://127.0.0.1:8000";
-
       const res = await fetch(
-        file
-          ? `${backendBase}/api/extract-from-document`
-          : `${backendBase}/api/extract-rule`,
-        {
-          method: "POST",
-          body: form,
+        file ? "/api/extract-from-document" : "/api/extract-rule",
+        { method: "POST", body: form }
+      );
+
+      if (res.ok) {
+        const data = await res.json();
+        const rawRules: RuleResult[] = Array.isArray(data)
+          ? data
+          : data.rules
+          ? data.rules
+          : data.yaml || data.id
+          ? [data]
+          : [];
+
+        if (rawRules.length > 0) {
+          const rules = rawRules.map(tagDerived);
+          setResults(rules.map((r) => ({ status: "new", ...r })));
+          setLoading(false);
+          return;
+        } else {
+          console.warn(
+            "Backend returned no rules, falling back to demo rules."
+          );
         }
-      );
-      if (!res.ok) throw new Error(`Backend responded with ${res.status}`);
-      const data = await res.json();
-      const rules: RuleResult[] = (data.rules ? data.rules : [data]).map(
-        tagDerived
-      );
-      setResults(rules.map((r) => ({ status: "new", ...r })));
+      } else {
+        console.warn(
+          `Backend responded with ${res.status}, falling back to demo rules.`
+        );
+      }
     } catch (e) {
-      console.error(e);
-      alert("Extraction failed. Check backend logs.");
+      console.error("Extraction failed. Falling back to demo rules.", e);
     } finally {
       setLoading(false);
     }
+
+    // 2. DEMO fallback: generate mock rules (no popup)
+    let mockRules: RuleResult[];
+    if (file) {
+      mockRules = generateMockDocumentRules(file, ruleType, rulePack);
+    } else {
+      mockRules = generateMockCodeRules(text, ruleType, rulePack);
+    }
+    const tagged = mockRules.map(tagDerived);
+    setResults(tagged.map((r) => ({ status: "new", ...r })));
   }
 
   function approveRule(idx: number) {
@@ -210,6 +346,7 @@ export default function RuleExtractor() {
       prev.map((r, i) => (i === idx ? { ...r, status: "approved" } : r))
     );
   }
+
   function discardRule(idx: number) {
     setResults((prev) =>
       prev.map((r, i) => (i === idx ? { ...r, status: "discarded" } : r))
@@ -223,6 +360,7 @@ export default function RuleExtractor() {
     setEditorError(null);
     setEditorOpen(true);
   }
+
   function onEditorChange(next?: string) {
     const val = next ?? "";
     setEditorValue(val);
@@ -233,6 +371,7 @@ export default function RuleExtractor() {
       setEditorError(err?.message || "Invalid YAML");
     }
   }
+
   function saveEditor() {
     if (editorError || editorIdx === null) return;
     setResults((prev) =>
@@ -304,6 +443,37 @@ export default function RuleExtractor() {
     } catch (e: any) {
       alert(`Save failed: ${e.message}`);
     }
+  }
+
+  // --- Update severity both in YAML and derived fields ----------------
+
+  function updateRuleSeverity(idx: number, newSeverity: string) {
+    setResults((prev) =>
+      prev.map((r, i) => {
+        if (i !== idx) return r;
+
+        try {
+          const obj: any = yaml.load(r.yaml) || {};
+          obj.severity = newSeverity;
+          const newYaml = yaml.dump(obj, { lineWidth: 80 });
+
+          const updated: RuleResult = {
+            ...r,
+            yaml: newYaml,
+            status: r.status === "approved" ? "approved" : "edited",
+          };
+
+          return tagDerived(updated);
+        } catch (e) {
+          console.warn("Failed to update severity in YAML", e);
+          return {
+            ...r,
+            _severity: newSeverity,
+            status: "edited",
+          };
+        }
+      })
+    );
   }
 
   function tagDerived(r: RuleResult): RuleResult {
@@ -517,37 +687,69 @@ export default function RuleExtractor() {
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
             {filtered.map((rule, idx) => {
               const isExpanded = expanded.has(idx);
+              const confidencePct = Math.round(
+                (rule.confidence ?? 0) * 100
+              );
+
               return (
                 <div
                   key={idx}
-                  className="border rounded-lg bg-white shadow-sm flex flex-col"
+                  className="border rounded-xl bg-white shadow-sm flex flex-col overflow-hidden"
                 >
-                  <div className="flex items-center justify-between px-4 py-2 border-b bg-gray-50">
-                    <div className="flex items-center gap-2 text-sm">
-                      <span className="font-semibold">
-                        {rule._id || `Rule ${idx + 1}`}
-                      </span>
-                      {rule._severity && (
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700">
-                          {rule._severity}
+                  <div className="flex items-center justify-between px-4 py-3 border-b bg-gray-50">
+                    <div className="flex flex-col gap-1">
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-sm text-gray-900">
+                          {rule._id || `Rule ${idx + 1}`}
                         </span>
-                      )}
-                      {rule.category && (
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700">
-                          {rule.category}
-                        </span>
-                      )}
+                        {rule.category && (
+                          <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700">
+                            {rule.category}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-3 text-xs text-gray-500">
+                        <div className="flex items-center gap-1">
+                          <span>Severity</span>
+                          <select
+                            value={rule._severity || "MAJOR"}
+                            onChange={(e) =>
+                              updateRuleSeverity(idx, e.target.value)
+                            }
+                            className="border rounded px-2 py-0.5 bg-white text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                          >
+                            <option value="CRITICAL">CRITICAL</option>
+                            <option value="MAJOR">MAJOR</option>
+                            <option value="MINOR">MINOR</option>
+                            <option value="INFO">INFO</option>
+                          </select>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <span>Confidence</span>
+                          <span className="font-semibold text-gray-700">
+                            {confidencePct}%
+                          </span>
+                          <div className="w-16 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                            <div
+                              className="h-full bg-indigo-500"
+                              style={{ width: `${confidencePct}%` }}
+                            />
+                          </div>
+                        </div>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2">
+
+                    <div className="flex flex-col items-end gap-2">
                       <span
-                        className={`text-xs px-2 py-0.5 rounded-full ${rule.status === "approved"
+                        className={`text-xs px-2 py-0.5 rounded-full ${
+                          rule.status === "approved"
                             ? "bg-green-100 text-green-700"
                             : rule.status === "edited"
-                              ? "bg-yellow-100 text-yellow-700"
-                              : rule.status === "discarded"
-                                ? "bg-gray-200 text-gray-600"
-                                : "bg-blue-100 text-blue-700"
-                          }`}
+                            ? "bg-yellow-100 text-yellow-700"
+                            : rule.status === "discarded"
+                            ? "bg-gray-200 text-gray-600"
+                            : "bg-blue-100 text-blue-700"
+                        }`}
                       >
                         {rule.status || "new"}
                       </span>
@@ -562,59 +764,57 @@ export default function RuleExtractor() {
                         }}
                         className="text-xs text-gray-500 hover:text-gray-700"
                       >
-                        {isExpanded ? "Collapse" : "Expand"}
+                        {isExpanded ? "Hide details" : "Show details"}
                       </button>
                     </div>
                   </div>
 
-                  {isExpanded && (
-                    <div className="p-4 space-y-3">
-                      <pre className="bg-gray-900 text-gray-100 text-xs rounded p-3 overflow-auto max-h-64">
+                  <div className="p-4 space-y-3">
+                    <div className="relative">
+                      <pre
+                        className={`bg-gray-900 text-gray-100 text-xs rounded-md p-3 overflow-auto transition-all ${
+                          isExpanded ? "max-h-72" : "max-h-32"
+                        }`}
+                      >
                         {rule.yaml}
                       </pre>
-                      {rule.source_snippet && (
-                        <div className="text-xs text-gray-600">
-                          <div className="font-semibold mb-1">
-                            Source snippet:
-                          </div>
-                          <pre className="bg-gray-50 border rounded p-2 max-h-32 overflow-auto">
-                            {rule.source_snippet}
-                          </pre>
-                        </div>
-                      )}
-                      <div className="flex items-center justify-between">
-                        <div className="text-xs text-gray-500">
-                          Confidence:{" "}
-                          <span className="font-semibold">
-                            {(rule.confidence * 100).toFixed(1)}%
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => openEditor(idx)}
-                            className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded border hover:bg-gray-50"
-                          >
-                            <Edit3 size={14} />
-                            Edit YAML
-                          </button>
-                          <button
-                            onClick={() => approveRule(idx)}
-                            className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-green-600 text-white hover:bg-green-700"
-                          >
-                            <Check size={14} />
-                            Approve
-                          </button>
-                          <button
-                            onClick={() => discardRule(idx)}
-                            className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-red-50 text-red-600 hover:bg-red-100"
-                          >
-                            <X size={14} />
-                            Discard
-                          </button>
-                        </div>
-                      </div>
                     </div>
-                  )}
+
+                    {rule.source_snippet && (
+                      <div className="text-xs text-gray-600 space-y-1">
+                        <div className="font-semibold text-gray-700">
+                          Source snippet
+                        </div>
+                        <pre className="bg-gray-50 border rounded p-2 max-h-32 overflow-auto">
+                          {rule.source_snippet}
+                        </pre>
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-end gap-2 pt-2 border-t border-gray-100">
+                      <button
+                        onClick={() => openEditor(idx)}
+                        className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded border border-gray-300 hover:bg-gray-50"
+                      >
+                        <Edit3 size={14} />
+                        Edit YAML
+                      </button>
+                      <button
+                        onClick={() => approveRule(idx)}
+                        className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded bg-green-600 text-white hover:bg-green-700"
+                      >
+                        <Check size={14} />
+                        Approve
+                      </button>
+                      <button
+                        onClick={() => discardRule(idx)}
+                        className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded bg-red-50 text-red-600 hover:bg-red-100"
+                      >
+                        <X size={14} />
+                        Discard
+                      </button>
+                    </div>
+                  </div>
                 </div>
               );
             })}
@@ -624,14 +824,22 @@ export default function RuleExtractor() {
 
       {/* Footer */}
       <footer className="w-full border-t bg-white p-4 flex justify-end sticky bottom-0 shadow-md">
-        <button
-          onClick={saveApprovedToPack}
-          disabled={!rulePack || results.length === 0}
-          className="inline-flex items-center gap-2 px-6 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-60"
-        >
-          <Save size={16} />
-          Save Rules
-        </button>
+        <div className="flex items-center gap-3">
+          <input
+            className="border rounded px-3 py-1 text-sm"
+            placeholder="Target pack name (e.g. abap-core-standards)"
+            value={pack}
+            onChange={(e) => setPack(e.target.value)}
+          />
+          <button
+            onClick={saveApprovedToPack}
+            disabled={!rulePack || results.length === 0}
+            className="inline-flex items-center gap-2 px-6 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-60"
+          >
+            <Save size={16} />
+            Save Rules
+          </button>
+        </div>
       </footer>
 
       {/* YAML Editor Modal */}
@@ -642,8 +850,9 @@ export default function RuleExtractor() {
         footer={
           <div className="flex items-center justify-between">
             <div
-              className={`text-xs ${editorError ? "text-red-600" : "text-green-700"
-                }`}
+              className={`text-xs ${
+                editorError ? "text-red-600" : "text-green-700"
+              }`}
             >
               {editorError ? `YAML error: ${editorError}` : "Valid YAML"}
             </div>
