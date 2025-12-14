@@ -44,10 +44,29 @@ type Project = {
   description?: string;
 };
 
+// --- DEFAULT DEMO PROJECTS ---
+const mockProjects: Project[] = [
+  {
+    id: "mfp-hcm-core",
+    name: "MFP Development",
+    description: "Peoplehub application development.",
+  },
+  {
+    id: "abap_prog",
+    name: "ABAP Programming",
+    description: "ABAP HR Programming.",
+  },
+  {
+    id: "s4_conv",
+    name: "S/4HANA Migration",
+    description: "Migration of code to S/4 HANA.",
+  },
+];
+
 export default function RuleExtractor() {
   const [text, setText] = useState("");
   const [file, setFile] = useState<File | null>(null);
-  const [loading, setLoading] = useState(false); // extraction loading
+  const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<RuleResult[]>([]);
   const [pack, setPack] = useState<string>("abap-core-standards");
   const [filter, setFilter] = useState<{ category?: string; q?: string }>({});
@@ -56,9 +75,11 @@ export default function RuleExtractor() {
   const [rulePack, setRulePack] = useState<string>("");
   const [user, setUser] = useState<string>("Architect User");
 
-  // NEW: project state
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [selectedProjectId, setSelectedProjectId] = useState<string>("");
+  // Projects (initialized with demo values)
+  const [projects, setProjects] = useState<Project[]>(mockProjects);
+  const [selectedProjectId, setSelectedProjectId] = useState<string>(
+    mockProjects[0]?.id ?? ""
+  );
   const [loadingProjects, setLoadingProjects] = useState(false);
   const [loadingProjectRules, setLoadingProjectRules] = useState(false);
 
@@ -83,22 +104,26 @@ export default function RuleExtractor() {
     [projects, selectedProjectId]
   );
 
-  // --------- NEW: load projects on mount ----------
+  // --------- Load projects from backend (if available) ----------
   useEffect(() => {
     const loadProjects = async () => {
       try {
         setLoadingProjects(true);
         const res = await fetch("/api/projects");
         if (!res.ok) {
-          throw new Error(`Failed to load projects (${res.status})`);
+          // Backend not ready or returns error – keep mock projects
+          console.warn(
+            `Projects API not available (${res.status}), using demo projects`
+          );
+          return;
         }
         const data: Project[] = await res.json();
-        setProjects(data || []);
         if (data && data.length > 0) {
+          setProjects(data);
           setSelectedProjectId(data[0].id);
         }
       } catch (err) {
-        console.error("Error loading projects", err);
+        console.warn("Error loading projects, using demo projects", err);
       } finally {
         setLoadingProjects(false);
       }
@@ -106,7 +131,7 @@ export default function RuleExtractor() {
     loadProjects();
   }, []);
 
-  // --------- NEW: load rules when project changes ----------
+  // --------- Load rules when project changes ----------
   useEffect(() => {
     const loadRulesForProject = async () => {
       if (!selectedProjectId) {
@@ -117,18 +142,19 @@ export default function RuleExtractor() {
         setLoadingProjectRules(true);
         const res = await fetch(`/api/projects/${selectedProjectId}/rules`);
         if (!res.ok) {
-          throw new Error(`Failed to load rules for project (${res.status})`);
+          console.warn(
+            `Rules API for project ${selectedProjectId} not available (${res.status}), keeping existing rules`
+          );
+          return;
         }
         const data = await res.json();
-        // assuming API returns { rules: [...] } or just [...]
         const rawRules: RuleResult[] = Array.isArray(data)
           ? data
           : data.rules || [];
         const tagged = rawRules.map(tagDerived);
         setResults(tagged.map((r) => ({ status: "approved", ...r })));
       } catch (err) {
-        console.error("Error loading project rules", err);
-        // do not wipe previous results if fetch fails
+        console.warn("Error loading project rules, keeping existing rules", err);
       } finally {
         setLoadingProjectRules(false);
       }
@@ -152,12 +178,18 @@ export default function RuleExtractor() {
       form.append("rule_type", ruleType);
       form.append("rule_pack", rulePack);
       form.append("created_by", user);
-      // NEW: associate extraction with project
       form.append("project_id", selectedProjectId);
 
+      const backendBase = "http://127.0.0.1:8000";
+
       const res = await fetch(
-        file ? "/api/extract-from-document" : "/api/extract-rule",
-        { method: "POST", body: form }
+        file
+          ? `${backendBase}/api/extract-from-document`
+          : `${backendBase}/api/extract-rule`,
+        {
+          method: "POST",
+          body: form,
+        }
       );
       if (!res.ok) throw new Error(`Backend responded with ${res.status}`);
       const data = await res.json();
@@ -216,13 +248,23 @@ export default function RuleExtractor() {
   function getRulePacksForType(type: string): string[] {
     switch (type) {
       case "code":
-        return ["abap-core-safety", "abap-db-standards", "abap-unit-tests"];
+        return [
+          "abap-core-safety",
+          "abap-core-exception",
+          "abap-db-standards",
+          "abap-unit-tests",
+          "abap-core-syntax",
+        ];
       case "design":
         return ["architecture-guidelines", "design-patterns"];
       case "naming":
         return ["naming-standards", "package-prefixes"];
       case "performance":
-        return ["performance-optimizations", "sql-guidelines"];
+        return [
+          "performance-optimizations",
+          "sql-guidelines",
+          "abap-core-performance",
+        ];
       case "template":
         return ["code-templates", "developer-snippets"];
       default:
@@ -247,7 +289,6 @@ export default function RuleExtractor() {
         body: JSON.stringify({
           name: pack,
           status: "draft",
-          // you might also want to send project_id here if packs are per-project
           project_id: selectedProjectId || undefined,
           rules: approved.map((r) => {
             try {
@@ -290,7 +331,7 @@ export default function RuleExtractor() {
             <span>Rule Extraction</span>
           </div>
 
-          {/* NEW: Project selector */}
+          {/* Project & Rule Type */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-semibold text-gray-700 mb-1">
@@ -335,6 +376,7 @@ export default function RuleExtractor() {
             </div>
           </div>
 
+          {/* Rule Pack + User */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-semibold text-gray-700 mb-1">
@@ -346,9 +388,9 @@ export default function RuleExtractor() {
                 className="border rounded w-full px-2 py-1 text-sm text-gray-700 focus:ring-2 focus:ring-indigo-500"
               >
                 <option value="">-- Choose Pack --</option>
-                {rulePackOptions.map((pack) => (
-                  <option key={pack} value={pack}>
-                    {pack}
+                {rulePackOptions.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
                   </option>
                 ))}
               </select>
@@ -365,6 +407,7 @@ export default function RuleExtractor() {
             </div>
           </div>
 
+          {/* Code / guideline editor */}
           <label className="block text-sm text-gray-600 mb-1">
             Paste code or guideline text
           </label>
@@ -387,6 +430,7 @@ export default function RuleExtractor() {
             />
           </div>
 
+          {/* Upload */}
           <div className="flex items-center gap-3">
             <label className="block text-sm text-gray-600">
               Upload document (PDF/DOCX/TXT/MD)
@@ -407,6 +451,7 @@ export default function RuleExtractor() {
             </span>
           </div>
 
+          {/* Extract Button */}
           <button
             onClick={extractRules}
             disabled={loading || (!text && !file) || !selectedProjectId}
@@ -495,15 +540,14 @@ export default function RuleExtractor() {
                     </div>
                     <div className="flex items-center gap-2">
                       <span
-                        className={`text-xs px-2 py-0.5 rounded-full ${
-                          rule.status === "approved"
+                        className={`text-xs px-2 py-0.5 rounded-full ${rule.status === "approved"
                             ? "bg-green-100 text-green-700"
                             : rule.status === "edited"
-                            ? "bg-yellow-100 text-yellow-700"
-                            : rule.status === "discarded"
-                            ? "bg-gray-200 text-gray-600"
-                            : "bg-blue-100 text-blue-700"
-                        }`}
+                              ? "bg-yellow-100 text-yellow-700"
+                              : rule.status === "discarded"
+                                ? "bg-gray-200 text-gray-600"
+                                : "bg-blue-100 text-blue-700"
+                          }`}
                       >
                         {rule.status || "new"}
                       </span>
@@ -578,7 +622,7 @@ export default function RuleExtractor() {
         </main>
       </div>
 
-      {/* --- Page Footer --- */}
+      {/* Footer */}
       <footer className="w-full border-t bg-white p-4 flex justify-end sticky bottom-0 shadow-md">
         <button
           onClick={saveApprovedToPack}
@@ -598,9 +642,8 @@ export default function RuleExtractor() {
         footer={
           <div className="flex items-center justify-between">
             <div
-              className={`text-xs ${
-                editorError ? "text-red-600" : "text-green-700"
-              }`}
+              className={`text-xs ${editorError ? "text-red-600" : "text-green-700"
+                }`}
             >
               {editorError ? `YAML error: ${editorError}` : "Valid YAML"}
             </div>

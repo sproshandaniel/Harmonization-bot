@@ -9,11 +9,12 @@ import {
 } from "recharts";
 
 export default function Dashboard() {
-  // Mock KPI data
+  // Mock KPI data (including Projects)
   const kpis = [
     { title: "Total Rules", value: 120, color: "text-indigo-700" },
     { title: "Violations Today", value: 18, color: "text-red-600" },
     { title: "Compliance Score", value: "93%", color: "text-green-600" },
+    { title: "Projects", value: 7, color: "text-sky-700" }, // ← NEW KPI
   ];
 
   // Mock violation trend data (for chart)
@@ -29,23 +30,23 @@ export default function Dashboard() {
   const violations = [
     {
       rulePack: "abap-core-safety",
-      object: "ZHR_PAYROLL.abap",
-      transport: "TRK12345",
-      developer: "S. Patel",
+      object: "ZRP_MFP_CLOCK_UPDATE_DB",
+      transport: "ZEDK1234456",
+      developer: "Prashanth Selvam",
       severity: "Error",
     },
     {
       rulePack: "abap-naming-conv",
-      object: "ZFI_GL_REPORT.abap",
-      transport: "TRK67890",
-      developer: "R. Kumar",
+      object: "ZCL_MFP_LEAVE_REQUEST",
+      transport: "ZEDK1235656",
+      developer: "Keerthivasan Vasudevan",
       severity: "Warning",
     },
     {
       rulePack: "security-base",
-      object: "ZMM_PURCHASE_ORDER.abap",
-      transport: "TRK54321",
-      developer: "M. Lee",
+      object: "ZMFP_NETWORKS_WBS",
+      transport: "ZEDK1237786",
+      developer: "Duraimurugan kathirvel",
       severity: "Error",
     },
   ];
@@ -53,7 +54,7 @@ export default function Dashboard() {
   return (
     <div className="p-8">
       {/* KPI cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 mb-10">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-10">
         {kpis.map((kpi) => (
           <div
             key={kpi.title}

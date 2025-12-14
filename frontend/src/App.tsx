@@ -20,9 +20,6 @@ export default function App() {
       <div className="flex min-h-screen bg-gray-50 text-gray-800">
         {/* Sidebar */}
         <aside className="w-64 bg-indigo-700 text-white flex flex-col">
-          <div className="px-6 py-5 text-xl font-bold border-b border-indigo-600">
-            Harmonization Bot
-          </div>
 
           <nav className="flex-1 p-4 space-y-2">
             {navItems.map((item) => (
@@ -38,7 +35,7 @@ export default function App() {
           </nav>
 
           <div className="px-6 py-3 border-t border-indigo-600 text-xs text-indigo-200">
-            © 2025 Harmonization Dashboard
+            Zalaris Code Governance
           </div>
         </aside>
 
@@ -46,7 +43,7 @@ export default function App() {
         <main className="flex-1 flex flex-col">
           {/* Topbar */}
           <header className="flex items-center justify-between bg-white px-8 py-4 shadow-sm">
-            <h1 className="text-2xl font-semibold text-indigo-700">Harmonization Dashboard</h1>
+            <h1 className="text-2xl font-semibold text-indigo-700">Zalaris Code Governance Platform</h1>
             <div className="flex items-center space-x-4">
               <div className="text-sm text-gray-600">Architect User</div>
               <div className="w-8 h-8 rounded-full bg-indigo-500 flex items-center justify-center text-white">
