@@ -45,6 +45,7 @@ DEFAULT_APP_SETTINGS: dict[str, Any] = {
         "max_tokens": 1200,
         "response_length": "medium",
         "log_suggestions": True,
+        "allow_llm_fallback": False,
     },
     "dashboard_preferences": {
         "default_date_range_days": 30,
@@ -267,7 +268,23 @@ def _derive_rule_fields(rule: dict[str, Any]) -> dict[str, Any]:
         derived["yaml_text"] = yaml.safe_dump(rule, sort_keys=False)
 
     derived["rule_id"] = str(parsed.get("id") or rule.get("_id") or "unknown.rule")
-    derived["category"] = str(parsed.get("type") or rule.get("category") or "code").lower()
+    raw_category = str(parsed.get("type") or rule.get("category") or "code").lower()
+    if raw_category in {"naming", "performance"}:
+        derived["category"] = "code"
+        if isinstance(parsed, dict):
+            normalized_subtags: list[str] = []
+            raw_subtags = parsed.get("subtags")
+            if isinstance(raw_subtags, list):
+                normalized_subtags = [str(item or "").strip().lower() for item in raw_subtags if str(item or "").strip()]
+            if "code" not in normalized_subtags:
+                normalized_subtags.insert(0, "code")
+            if raw_category not in normalized_subtags:
+                normalized_subtags.append(raw_category)
+            parsed["type"] = "code"
+            parsed["subtags"] = normalized_subtags
+            derived["yaml_text"] = yaml.safe_dump(parsed, sort_keys=False)
+    else:
+        derived["category"] = raw_category
     derived["severity"] = str(parsed.get("severity") or rule.get("_severity") or "MAJOR").upper()
     derived["source_snippet"] = rule.get("source_snippet")
 
@@ -1094,6 +1111,8 @@ def get_rule_summary(created_by: str | None = None) -> dict[str, int]:
     counts = {key: 0 for key in categories}
     naming_from_code = 0
     performance_from_code = 0
+    legacy_naming = 0
+    legacy_performance = 0
     with _get_conn() as conn:
         sql = """
             SELECT category, yaml_text
@@ -1116,6 +1135,12 @@ def get_rule_summary(created_by: str | None = None) -> dict[str, int]:
 
     for row in rows:
         category = str(row["category"]).lower()
+        if category == "naming":
+            legacy_naming += 1
+            continue
+        if category == "performance":
+            legacy_performance += 1
+            continue
         if category in counts:
             counts[category] += 1
         if category != "code":
@@ -1137,14 +1162,16 @@ def get_rule_summary(created_by: str | None = None) -> dict[str, int]:
         if "performance" in subtags:
             performance_from_code += 1
 
-    code_total = counts["code"] + counts["naming"] + counts["performance"]
-    code_naming_total = naming_from_code + counts["naming"]
-    code_performance_total = performance_from_code + counts["performance"]
+    naming_total = naming_from_code + legacy_naming
+    performance_total = performance_from_code + legacy_performance
+    code_total = counts["code"] + legacy_naming + legacy_performance
 
+    counts["naming"] = naming_total
+    counts["performance"] = performance_total
     counts["wizard"] = wizard_count
     counts["code_total"] = code_total
-    counts["code_naming"] = code_naming_total
-    counts["code_performance"] = code_performance_total
+    counts["code_naming"] = naming_total
+    counts["code_performance"] = performance_total
     counts["total"] = code_total + counts["design"] + counts["template"] + counts["wizard"]
     return counts
 
@@ -1418,6 +1445,20 @@ def get_ai_model_name(default: str = "gpt-4o-mini") -> str:
         model = str(ai.get("model") or "").strip()
         if model:
             return model
+    return default
+
+
+def get_ai_llm_fallback_enabled(default: bool = False) -> bool:
+    settings = get_app_settings_unmasked()
+    ai = settings.get("ai_assistant_controls")
+    if isinstance(ai, dict):
+        value = ai.get("allow_llm_fallback")
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        if isinstance(value, (int, float)):
+            return bool(value)
     return default
 
 

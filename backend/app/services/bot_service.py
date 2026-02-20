@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 
 from app.services.store_service import (
     create_dashboard_violation,
+    get_ai_llm_fallback_enabled,
+    get_ai_model_name,
     get_model_api_key,
     get_rules_for_pack,
     get_rules_for_project,
@@ -35,6 +37,7 @@ class ResolvedRule:
     rule_pack: str
     template_snippet: str
     wizard_snippet: str
+    subtags: list[str]
     metadata: dict[str, Any]
     raw_yaml: str
 
@@ -76,6 +79,24 @@ def _line_from_index(text: str, index: int) -> int:
 
 def _safe_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _normalize_code_subtags(value: Any) -> list[str]:
+    items: list[str] = []
+    if isinstance(value, list):
+        items = [str(v or "").strip().lower() for v in value]
+    elif isinstance(value, str):
+        items = [part.strip().lower() for part in value.split(",")]
+
+    out: list[str] = []
+    for item in items:
+        if item in {"coe", "coding"}:
+            item = "code"
+        if item == "perf":
+            item = "performance"
+        if item in {"code", "naming", "performance"} and item not in out:
+            out.append(item)
+    return out
 
 
 def _rule_requires_arithmetic_try_catch(rule: ResolvedRule) -> bool:
@@ -182,16 +203,28 @@ def _resolve_rule(rule_row: dict[str, Any]) -> ResolvedRule | None:
         or rule_row.get("_id")
         or "unknown.rule"
     ).strip()
-    rule_type = str(
+    raw_rule_type = str(
         parsed.get("type")
         or rule_row.get("category")
         or "code"
     ).lower().strip()
+    rule_type = raw_rule_type
     severity = str(
         parsed.get("severity")
         or rule_row.get("_severity")
         or "MAJOR"
     ).upper().strip()
+    subtags = _normalize_code_subtags(parsed.get("subtags"))
+    metadata = _safe_dict(parsed.get("metadata"))
+    if raw_rule_type in {"naming", "performance"}:
+        rule_type = "code"
+        if "code" not in subtags:
+            subtags.insert(0, "code")
+        if raw_rule_type not in subtags:
+            subtags.append(raw_rule_type)
+        metadata["legacy_type"] = raw_rule_type
+    elif rule_type == "code" and "code" not in subtags:
+        subtags.insert(0, "code")
 
     return ResolvedRule(
         rule_id=rule_id,
@@ -206,7 +239,8 @@ def _resolve_rule(rule_row: dict[str, Any]) -> ResolvedRule | None:
         rule_pack=str(rule_row.get("rule_pack") or "generic").strip() or "generic",
         template_snippet=str(template_block.get("snippet") or "").strip(),
         wizard_snippet=str(wizard_template.get("snippet") or "").strip(),
-        metadata=_safe_dict(parsed.get("metadata")),
+        subtags=subtags,
+        metadata=metadata,
         raw_yaml=yaml_text,
     )
 
@@ -315,7 +349,7 @@ def _validate_code(code: str, rules: list[ResolvedRule]) -> list[dict[str, Any]]
     if not code.strip():
         return violations
 
-    valid_types = {"code", "design", "naming", "performance"}
+    valid_types = {"code", "design"}
     for rule in rules:
         if rule.rule_type not in valid_types:
             continue
@@ -535,6 +569,106 @@ def _is_template_or_wizard_request(query: str) -> bool:
     return has_code_word and (has_action_word or has_domain_hint)
 
 
+def _has_satisfactory_rule_match(query: str, rules: list[ResolvedRule]) -> bool:
+    q = (query or "").strip().lower()
+    if not q:
+        return False
+    query_tokens = _tokenize(q)
+    if not query_tokens:
+        return False
+
+    for rule in rules:
+        haystack = " ".join(
+            [
+                rule.title,
+                rule.description,
+                rule.message,
+                rule.selector_pattern,
+                rule.fix,
+                rule.rationale,
+                rule.rule_id,
+                rule.rule_type,
+            ]
+        ).lower()
+        if q in haystack:
+            return True
+        overlap = len(query_tokens & _tokenize(haystack))
+        if overlap >= 2:
+            return True
+    return False
+
+
+def _generate_llm_fallback_answer(
+    query: str,
+    code: str,
+    retrieved: list[ResolvedRule],
+    suggestions: dict[str, list[dict[str, str]]],
+    top_k: int,
+) -> str | None:
+    client = _get_embed_client()
+    if client is None:
+        return None
+
+    context_blocks: list[str] = []
+    for rule in retrieved[: max(1, min(top_k, 5))]:
+        context_blocks.append(
+            "\n".join(
+                [
+                    f"Rule: {rule.title}",
+                    f"Type: {rule.rule_type}",
+                    f"Severity: {rule.severity}",
+                    f"Description: {rule.description}",
+                    f"Fix: {rule.fix}",
+                ]
+            )
+        )
+    for item in suggestions.get("templates", [])[:2]:
+        context_blocks.append(
+            "\n".join(
+                [
+                    f"Template: {item.get('title', '')}",
+                    f"Snippet:\n{item.get('snippet', '')}",
+                ]
+            )
+        )
+
+    context_text = "\n\n".join(context_blocks).strip()
+    model = get_ai_model_name(default="gpt-4.1-mini")
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an ABAP governance assistant. Give safe, practical, concise guidance. "
+                "If uncertain, say assumptions clearly. Prefer standards-compliant ABAP patterns."
+            ),
+        },
+        {
+            "role": "user",
+            "content": "\n\n".join(
+                [
+                    f"Developer request:\n{query}",
+                    f"ABAP code context (may be empty):\n{code or '(none)'}",
+                    f"Governance context:\n{context_text or '(no direct rule matches)'}",
+                    "Provide: 1) what to do, 2) why, 3) an ABAP example/template when relevant.",
+                ]
+            ),
+        },
+    ]
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.2,
+            max_tokens=700,
+        )
+        content = response.choices[0].message.content if response.choices else ""
+        return (content or "").strip() or None
+    except Exception:
+        return None
+
+
 def _log_violations_to_dashboard(
     violations: list[dict[str, Any]],
     object_name: str,
@@ -568,6 +702,7 @@ def assist_with_rules(
     created_by: str | None = None,
     top_k: int = 5,
     log_violations: bool = True,
+    llm_fallback_confirmed: bool = False,
 ) -> dict[str, Any]:
     rule_rows = _load_rule_rows(project_id=project_id, pack_name=pack_name, created_by=created_by)
     resolved = [rule for row in rule_rows if (rule := _resolve_rule(row)) is not None]
@@ -606,10 +741,46 @@ def assist_with_rules(
         suggestions = _build_suggestions_for_query(query, template_pool, top_k=min(3, top_k))
     else:
         suggestions = {"templates": [], "wizards": []}
+
+    llm_fallback_enabled = get_ai_llm_fallback_enabled(default=False)
+    satisfactory = (
+        bool(violations)
+        or (wants_template and (bool(suggestions["templates"]) or bool(suggestions["wizards"])))
+        or (not wants_template and _has_satisfactory_rule_match(query, retrieved))
+    )
+    llm_fallback = {
+        "enabled": llm_fallback_enabled,
+        "requires_confirmation": False,
+        "used": False,
+        "answer": None,
+    }
+
+    if llm_fallback_enabled and not is_validate and not satisfactory:
+        if not llm_fallback_confirmed:
+            llm_fallback["requires_confirmation"] = True
+        else:
+            llm_answer = _generate_llm_fallback_answer(
+                query=query,
+                code=code,
+                retrieved=retrieved,
+                suggestions=suggestions,
+                top_k=top_k,
+            )
+            if llm_answer:
+                llm_fallback["used"] = True
+                llm_fallback["answer"] = llm_answer
+
     if violations:
         message = f"Validation failed: {len(violations)} violation(s) found."
     elif is_validate:
         message = "Validation passed: no violations found."
+    elif llm_fallback["requires_confirmation"]:
+        message = (
+            "I could not find a satisfactory rule-based answer. "
+            "Do you want me to fetch guidance from the LLM?"
+        )
+    elif llm_fallback["used"]:
+        message = "Rule matches were insufficient. Generated guidance from LLM fallback."
     elif suggestions["templates"] or suggestions["wizards"]:
         message = "Found relevant templates/wizard steps from your saved governance rules."
     elif wants_template:
@@ -624,6 +795,7 @@ def assist_with_rules(
         "violations": violations,
         "violations_logged": logged,
         "suggestions": suggestions,
+        "llm_fallback": llm_fallback,
         "retrieved": [
             {
                 "rule_id": rule.rule_id,

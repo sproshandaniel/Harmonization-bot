@@ -47,49 +47,50 @@ export default function Login({ onLogin }: LoginProps) {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-sky-100 via-cyan-50 to-blue-100 p-6 dark:from-slate-950 dark:via-slate-900 dark:to-slate-900 flex items-center justify-center">
-      <div className="w-full max-w-md rounded-xl border border-sky-200 bg-sky-50 p-7 shadow-lg dark:border-slate-700 dark:bg-slate-900">
-        <div className="mb-4 inline-flex rounded-md border border-slate-200 bg-white p-1 shadow-sm">
+    <div className="hb-login-page">
+      <div className="hb-login-glow" />
+      <div className="hb-login-card">
+        <div className="hb-login-logo">
           <img src={companyLogo} alt="Company logo" className="h-14 w-14" />
         </div>
-        <h1 className="mb-1 text-2xl font-bold text-indigo-700 dark:text-indigo-300">
+        <h1 className="hb-login-title">
           Harmonization Bot
         </h1>
-        <p className="mb-6 text-sm text-gray-600 dark:text-slate-300">
+        <p className="hb-login-subtitle">
           Sign in to access your governance dashboard.
         </p>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-slate-300">
+            <label className="hb-login-label">
               Email
             </label>
             <input
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="w-full rounded-md border px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+              className="hb-login-input"
               placeholder="name@company.com"
               autoComplete="email"
             />
           </div>
 
           <div>
-            <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-slate-300">
+            <label className="hb-login-label">
               Password
             </label>
             <input
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="w-full rounded-md border px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+              className="hb-login-input"
               placeholder="Enter password"
               autoComplete="current-password"
             />
           </div>
 
           {error && (
-            <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-md px-3 py-2">
+            <div className="hb-login-error">
               {error}
             </div>
           )}
@@ -97,7 +98,7 @@ export default function Login({ onLogin }: LoginProps) {
           <button
             type="submit"
             disabled={loading}
-            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2 rounded-md disabled:opacity-60"
+            className="hb-login-submit"
           >
             {loading ? "Signing in..." : "Login"}
           </button>

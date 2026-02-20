@@ -32,6 +32,7 @@ type AppSettings = {
     max_tokens: number;
     response_length: string;
     log_suggestions: boolean;
+    allow_llm_fallback: boolean;
   };
   dashboard_preferences: {
     default_date_range_days: number;
@@ -95,6 +96,7 @@ const defaultSettings: AppSettings = {
     max_tokens: 1200,
     response_length: "medium",
     log_suggestions: true,
+    allow_llm_fallback: false,
   },
   dashboard_preferences: {
     default_date_range_days: 30,
@@ -363,6 +365,7 @@ export default function Settings() {
             <option value="long">long</option>
           </select>
           <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={settings.ai_assistant_controls.log_suggestions} onChange={(e) => setSettings((p) => ({ ...p, ai_assistant_controls: { ...p.ai_assistant_controls, log_suggestions: e.target.checked } }))} /> Log assistant suggestions</label>
+          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={settings.ai_assistant_controls.allow_llm_fallback} onChange={(e) => setSettings((p) => ({ ...p, ai_assistant_controls: { ...p.ai_assistant_controls, allow_llm_fallback: e.target.checked } }))} /> Ask before LLM fallback</label>
         </div>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_auto]">
           <input

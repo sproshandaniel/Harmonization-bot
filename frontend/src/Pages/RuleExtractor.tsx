@@ -64,6 +64,7 @@ const MULTI_EXTRACT_TYPES = ["code", "design", "template"] as const;
 export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
   const [text, setText] = useState("");
   const [file, setFile] = useState<File | null>(null);
+  const [inputSource, setInputSource] = useState<"text" | "file">("text");
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<RuleResult[]>([]);
   const [filter, setFilter] = useState<{ category?: string; q?: string }>({});
@@ -80,6 +81,8 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
   const [rulePack, setRulePack] = useState<string>("");
   const createdBy = localStorage.getItem("hb_user_email") || "name@zalaris.com";
   const [extractError, setExtractError] = useState<string | null>(null);
+  const [formErrors, setFormErrors] = useState<Record<string, string>>({});
+  const [wizardSaveError, setWizardSaveError] = useState<string | null>(null);
 
   // Projects (initialized with demo values)
   const [projects, setProjects] = useState<Project[]>([]);
@@ -99,6 +102,7 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
   const [testCodeByIndex, setTestCodeByIndex] = useState<Record<number, string>>({});
   const [testResultByIndex, setTestResultByIndex] = useState<Record<number, RuleTestResult>>({});
   const [testingIndex, setTestingIndex] = useState<number | null>(null);
+  const [isDarkMode, setIsDarkMode] = useState(false);
 
   const filtered = useMemo(() => {
     return results
@@ -116,6 +120,7 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
     () => projects.find((p) => p.id === selectedProjectId) || null,
     [projects, selectedProjectId]
   );
+  const hasSourceInput = inputSource === "text" ? !!text.trim() : !!file;
 
   function showNotice(message: string) {
     setNoticeMessage(message);
@@ -144,6 +149,17 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
     loadProjects();
   }, []);
 
+  useEffect(() => {
+    const root = document.documentElement;
+    const syncTheme = () => {
+      setIsDarkMode(root.classList.contains("dark"));
+    };
+    syncTheme();
+    const observer = new MutationObserver(syncTheme);
+    observer.observe(root, { attributes: true, attributeFilter: ["class"] });
+    return () => observer.disconnect();
+  }, []);
+
   // --------- Keep extractor results session-only ----------
   useEffect(() => {
     setLoadingProjectRules(false);
@@ -157,56 +173,57 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
   // --------- Extract rules (backend only) ----------
 
   async function extractRules() {
-    if (!selectedProjectId) {
-      showNotice("Please select a project before extracting rules.");
-      return;
-    }
-
+    const nextErrors: Record<string, string> = {};
     const currentWizardSteps = results.filter(
       (r) => r.category === "wizard" && r.status !== "discarded"
     ).length;
     const derivedNextStepNo =
       ruleType === "wizard" ? currentWizardSteps + 1 : 1;
 
-    if (!text && !file) {
-      showNotice("Please paste some code or upload a document.");
-      return;
+    if (!selectedProjectId) nextErrors.project = "Please select a project.";
+    if (inputSource === "text" && !text.trim()) {
+      nextErrors.text = "Please paste code or guideline text.";
+    }
+    if (inputSource === "file" && !file) {
+      nextErrors.file = "Please select a file to upload.";
     }
     if (ruleType === "wizard" && !wizardName.trim()) {
-      showNotice("Please enter a wizard name.");
-      return;
+      nextErrors.wizardName = "Please enter a wizard name.";
     }
     if (ruleType === "wizard" && !wizardDescription.trim()) {
-      showNotice("Please enter a wizard description.");
-      return;
+      nextErrors.wizardDescription = "Please enter a wizard description.";
     }
     if (ruleType === "wizard" && wizardTotalSteps < 1) {
-      showNotice("Please enter a total step count (min 1).");
-      return;
+      nextErrors.wizardTotalSteps = "Please enter a total step count (min 1).";
     }
     if (ruleType === "wizard" && derivedNextStepNo > wizardTotalSteps) {
-      showNotice("All wizard steps have already been extracted.");
-      return;
+      nextErrors.wizardStepNo = "All wizard steps have already been extracted.";
     }
     if (ruleType === "wizard" && !wizardStepTitle.trim()) {
-      showNotice("Please enter a step title.");
-      return;
+      nextErrors.wizardStepTitle = "Please enter a step title.";
     }
     if (ruleType === "wizard" && !wizardStepDescription.trim()) {
-      showNotice("Please enter a step description.");
-      return;
+      nextErrors.wizardStepDescription = "Please enter a step description.";
     }
     if (ruleType === "multi" && multiRuleTypes.length === 0) {
-      showNotice("Please select at least one rule type for multi extraction.");
+      nextErrors.multiRuleTypes = "Please select at least one type.";
+    }
+
+    if (Object.keys(nextErrors).length > 0) {
+      setFormErrors(nextErrors);
       return;
     }
+    setFormErrors({});
     setLoading(true);
     setExtractError(null);
 
     try {
       const form = new FormData();
-      if (file) form.append("file", file);
-      else form.append("text", text);
+      if (inputSource === "file" && file) {
+        form.append("file", file);
+      } else {
+        form.append("text", text);
+      }
       form.append("rule_type", ruleType === "multi" ? "code" : ruleType);
       if (ruleType === "multi") {
         form.append("rule_types", multiRuleTypes.join(","));
@@ -229,7 +246,7 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
       form.append("project_id", selectedProjectId);
 
       const res = await fetch(
-        file ? "/api/extract-from-document" : "/api/extract-rule",
+        inputSource === "file" ? "/api/extract-from-document" : "/api/extract-rule",
         { method: "POST", body: form }
       );
 
@@ -429,32 +446,26 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
   }
 
   async function saveWizard() {
-    if (!selectedProjectId) {
-      showNotice("Please select a project.");
-      return;
-    }
-    if (!wizardName.trim()) {
-      showNotice("Please enter a wizard name.");
-      return;
-    }
-    if (!wizardDescription.trim()) {
-      showNotice("Please enter a wizard description.");
-      return;
-    }
-    if (wizardTotalSteps < 1) {
-      showNotice("Please enter a total step count (min 1).");
-      return;
-    }
+    const nextErrors: Record<string, string> = {};
+    if (!selectedProjectId) nextErrors.project = "Please select a project.";
+    if (!wizardName.trim()) nextErrors.wizardName = "Please enter a wizard name.";
+    if (!wizardDescription.trim()) nextErrors.wizardDescription = "Please enter a wizard description.";
+    if (wizardTotalSteps < 1) nextErrors.wizardTotalSteps = "Please enter a total step count (min 1).";
 
     const wizardSteps = results.filter(
       (r) => r.category === "wizard" && r.status !== "discarded"
     );
     if (wizardSteps.length === 0) {
-      showNotice("No wizard steps to save.");
+      nextErrors.wizardSteps = "Extract at least one wizard step before saving.";
+    }
+
+    if (Object.keys(nextErrors).length > 0) {
+      setFormErrors((prev) => ({ ...prev, ...nextErrors }));
       return;
     }
 
     try {
+      setWizardSaveError(null);
       const res = await fetch("/api/wizards", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -481,10 +492,11 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
       setSaveSuccessOpen(true);
       setResults([]);
       setWizardNextStepNo(1);
+      setFormErrors((prev) => ({ ...prev, wizardSteps: "" }));
       onRuleSaved?.();
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Save failed";
-      showNotice(message);
+      setWizardSaveError(message);
     }
   }
 
@@ -492,7 +504,10 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
     const rule = results[idx];
     const testCode = (testCodeByIndex[idx] || "").trim();
     if (!testCode) {
-      showNotice("Enter code to test.");
+      setTestResultByIndex((prev) => ({
+        ...prev,
+        [idx]: { ok: false, passed: false, message: "Enter code to test." },
+      }));
       return;
     }
     try {
@@ -623,7 +638,10 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
               </label>
               <select
                 value={selectedProjectId}
-                onChange={(e) => setSelectedProjectId(e.target.value)}
+                onChange={(e) => {
+                  setSelectedProjectId(e.target.value);
+                  setFormErrors((prev) => ({ ...prev, project: "" }));
+                }}
                 className="border rounded w-full px-2 py-1 text-sm text-gray-700 focus:ring-2 focus:ring-indigo-500"
               >
                 <option value="">
@@ -639,6 +657,9 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
                 <p className="mt-1 text-xs text-gray-500 line-clamp-2">
                   {selectedProject.description}
                 </p>
+              )}
+              {formErrors.project && (
+                <p className="mt-1 text-xs text-red-600">{formErrors.project}</p>
               )}
             </div>
 
@@ -683,6 +704,9 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
                   </label>
                 ))}
               </div>
+              {formErrors.multiRuleTypes && (
+                <p className="mt-1 text-xs text-red-600">{formErrors.multiRuleTypes}</p>
+              )}
             </div>
           )}
 
@@ -739,9 +763,15 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
                 <input
                   className="border rounded w-full px-2 py-1 text-sm text-gray-700 focus:ring-2 focus:ring-indigo-500"
                   value={wizardName}
-                  onChange={(e) => setWizardName(e.target.value)}
+                  onChange={(e) => {
+                    setWizardName(e.target.value);
+                    setFormErrors((prev) => ({ ...prev, wizardName: "" }));
+                  }}
                   placeholder="e.g. ABAP Factory Pattern Wizard"
                 />
+                {formErrors.wizardName && (
+                  <p className="mt-1 text-xs text-red-600">{formErrors.wizardName}</p>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-semibold text-gray-700 mb-1">
@@ -750,9 +780,15 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
                 <textarea
                   className="border rounded w-full px-2 py-1 text-sm text-gray-700 focus:ring-2 focus:ring-indigo-500"
                   value={wizardDescription}
-                  onChange={(e) => setWizardDescription(e.target.value)}
+                  onChange={(e) => {
+                    setWizardDescription(e.target.value);
+                    setFormErrors((prev) => ({ ...prev, wizardDescription: "" }));
+                  }}
                   placeholder="Short description of this wizard"
                 />
+                {formErrors.wizardDescription && (
+                  <p className="mt-1 text-xs text-red-600">{formErrors.wizardDescription}</p>
+                )}
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
@@ -762,9 +798,15 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
                   <input
                     className="border rounded w-full px-2 py-1 text-sm text-gray-700 focus:ring-2 focus:ring-indigo-500"
                     value={wizardStepTitle}
-                    onChange={(e) => setWizardStepTitle(e.target.value)}
+                    onChange={(e) => {
+                      setWizardStepTitle(e.target.value);
+                      setFormErrors((prev) => ({ ...prev, wizardStepTitle: "" }));
+                    }}
                     placeholder="Short step title"
                   />
+                  {formErrors.wizardStepTitle && (
+                    <p className="mt-1 text-xs text-red-600">{formErrors.wizardStepTitle}</p>
+                  )}
                 </div>
                 <div>
                   <label className="block text-sm font-semibold text-gray-700 mb-1">
@@ -773,13 +815,58 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
                   <input
                     className="border rounded w-full px-2 py-1 text-sm text-gray-700 focus:ring-2 focus:ring-indigo-500"
                     value={wizardStepDescription}
-                    onChange={(e) => setWizardStepDescription(e.target.value)}
+                    onChange={(e) => {
+                      setWizardStepDescription(e.target.value);
+                      setFormErrors((prev) => ({ ...prev, wizardStepDescription: "" }));
+                    }}
                     placeholder="Short step description"
                   />
+                  {formErrors.wizardStepDescription && (
+                    <p className="mt-1 text-xs text-red-600">{formErrors.wizardStepDescription}</p>
+                  )}
                 </div>
               </div>
+              {formErrors.wizardTotalSteps && (
+                <p className="text-xs text-red-600">{formErrors.wizardTotalSteps}</p>
+              )}
+              {formErrors.wizardStepNo && (
+                <p className="text-xs text-red-600">{formErrors.wizardStepNo}</p>
+              )}
             </>
           )}
+          <div>
+            <label className="block text-sm font-semibold text-gray-700 mb-2">
+              Input Source
+            </label>
+            <div className="inline-flex rounded-md border border-gray-300 bg-gray-50 p-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setInputSource("text");
+                  setFile(null);
+                  setFormErrors((prev) => ({ ...prev, file: "", text: "" }));
+                }}
+                className={`px-3 py-1 text-xs rounded ${
+                  inputSource === "text" ? "bg-indigo-600 text-white" : "text-gray-700"
+                }`}
+              >
+                Paste Text
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setInputSource("file");
+                  setText("");
+                  setFormErrors((prev) => ({ ...prev, file: "", text: "" }));
+                }}
+                className={`px-3 py-1 text-xs rounded ${
+                  inputSource === "file" ? "bg-indigo-600 text-white" : "text-gray-700"
+                }`}
+              >
+                Upload File
+              </button>
+            </div>
+          </div>
           {/* Code / guideline editor */}
           <div className="flex items-center justify-between">
             <label className="block text-sm text-gray-600 mb-1">
@@ -788,18 +875,22 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
             <button
               type="button"
               onClick={() => setText("")}
+              disabled={inputSource !== "text"}
               className="text-xs px-3 py-1.5 rounded border border-gray-300 hover:bg-gray-50"
             >
               Clear Input
             </button>
           </div>
-          <div className="border rounded overflow-hidden">
+          <div className={`border rounded overflow-hidden ${inputSource !== "text" ? "opacity-60" : ""}`}>
             <Editor
               height="500px"
               defaultLanguage="plaintext"
-              theme="vs-light"
+              theme={isDarkMode ? "vs-dark" : "vs-light"}
               value={text}
-              onChange={(val) => setText(val ?? "")}
+              onChange={(val) => {
+                setText(val ?? "");
+                if (val?.trim()) setFormErrors((prev) => ({ ...prev, text: "" }));
+              }}
               options={{
                 minimap: { enabled: false },
                 fontSize: 14,
@@ -808,9 +899,13 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
                 scrollBeyondLastLine: false,
                 wordWrap: "on",
                 padding: { top: 12, bottom: 12 },
+                readOnly: inputSource !== "text",
               }}
             />
           </div>
+          {formErrors.text && (
+            <p className="text-xs text-red-600">{formErrors.text}</p>
+          )}
 
           {/* Upload */}
           <div className="flex items-center gap-3">
@@ -819,24 +914,35 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
             </label>
           </div>
           <div className="flex items-center gap-3">
-            <label className="inline-flex items-center px-3 py-2 bg-gray-100 rounded border cursor-pointer hover:bg-gray-200">
+            <label className={`inline-flex items-center px-3 py-2 rounded border ${
+              inputSource === "file"
+                ? "bg-gray-100 cursor-pointer hover:bg-gray-200"
+                : "bg-gray-100/70 text-gray-400 cursor-not-allowed"
+            }`}>
               <Upload size={16} className="mr-2" /> Choose File
               <input
                 type="file"
                 className="hidden"
                 accept=".pdf,.docx,.txt,.md"
-                onChange={(e) => setFile(e.target.files?.[0] || null)}
+                disabled={inputSource !== "file"}
+                onChange={(e) => {
+                  setFile(e.target.files?.[0] || null);
+                  setFormErrors((prev) => ({ ...prev, file: "" }));
+                }}
               />
             </label>
             <span className="text-sm text-gray-600">
               {file ? file.name : "No file selected"}
             </span>
           </div>
+          {formErrors.file && (
+            <p className="text-xs text-red-600">{formErrors.file}</p>
+          )}
 
           {/* Extract Button */}
           <button
             onClick={extractRules}
-            disabled={loading || (!text && !file) || !selectedProjectId}
+            disabled={loading || !selectedProjectId || !hasSourceInput}
             className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-60"
           >
             <Wand2 size={16} />
@@ -883,13 +989,21 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
                 results.some(
                   (r) => r.category === "wizard" && r.status !== "discarded"
                 ) && (
-                  <button
-                    onClick={saveWizard}
-                    className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700"
-                  >
-                    <Save size={14} />
-                    Save Wizard
-                  </button>
+                  <div className="flex flex-col items-end gap-1">
+                    <button
+                      onClick={saveWizard}
+                      className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700"
+                    >
+                      <Save size={14} />
+                      Save Wizard
+                    </button>
+                    {formErrors.wizardSteps && (
+                      <span className="text-xs text-red-600">{formErrors.wizardSteps}</span>
+                    )}
+                    {wizardSaveError && (
+                      <span className="text-xs text-red-600">{wizardSaveError}</span>
+                    )}
+                  </div>
                 )}
               <div className="flex items-center gap-2 border rounded px-2 py-1 bg-white">
                 <Filter size={16} />
@@ -1210,6 +1324,7 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
           <Editor
             height="100%"
             defaultLanguage="yaml"
+            theme={isDarkMode ? "vs-dark" : "vs-light"}
             value={editorValue}
             onChange={onEditorChange}
             options={{

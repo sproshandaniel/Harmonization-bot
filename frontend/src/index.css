@@ -2,10 +2,447 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --hb-body-bg: #f4f8fb;
+  --hb-body-fg: #0f172a;
+  --hb-shell-bg: radial-gradient(1300px 700px at 15% -10%, #d7edf8 0%, #f4f8fb 40%, #ecf4fb 100%);
+
+  --hb-sidebar-from: #0f2840;
+  --hb-sidebar-via: #133253;
+  --hb-sidebar-to: #1a4066;
+  --hb-sidebar-border: rgba(191, 219, 254, 0.3);
+  --hb-sidebar-label: #c7def4;
+  --hb-sidebar-text: #e6f2ff;
+  --hb-sidebar-footer: #d7e8f8;
+
+  --hb-nav-hover-bg: rgba(174, 215, 255, 0.2);
+  --hb-nav-active-bg: rgba(110, 182, 255, 0.32);
+  --hb-nav-ring: rgba(209, 233, 255, 0.5);
+
+  --hb-main-bg: transparent;
+  --hb-header-bg: linear-gradient(92deg, #123b5f 0%, #1c5a86 48%, #2b729f 100%);
+  --hb-header-border: rgba(148, 197, 240, 0.45);
+  --hb-header-text: #f2f9ff;
+  --hb-title: #f8fbff;
+
+  --hb-logo-bg: #ffffff;
+  --hb-logo-border: #bfdbfe;
+
+  --hb-control-bg: rgba(255, 255, 255, 0.12);
+  --hb-control-border: rgba(222, 240, 255, 0.35);
+  --hb-control-text: #f5faff;
+  --hb-control-hover: rgba(255, 255, 255, 0.24);
+  --hb-user-text: #ecf7ff;
+  --hb-avatar-bg: #7dd3fc;
+  --hb-avatar-text: #083344;
+
+  --hb-content-bg: transparent;
+
+  --hb-login-overlay: linear-gradient(135deg, rgba(151, 220, 255, 0.2), rgba(186, 230, 253, 0.08));
+  --hb-login-card-bg: rgba(255, 255, 255, 0.8);
+  --hb-login-card-border: rgba(148, 197, 240, 0.45);
+  --hb-login-title: #0f2f53;
+  --hb-login-subtitle: #2f4a6a;
+  --hb-login-label: #264565;
+  --hb-login-input-bg: rgba(255, 255, 255, 0.95);
+  --hb-login-input-border: rgba(148, 197, 240, 0.6);
+  --hb-login-input-text: #0f172a;
+  --hb-login-input-placeholder: #5f7893;
+  --hb-login-input-focus: rgba(59, 130, 246, 0.35);
+  --hb-login-submit-bg: linear-gradient(95deg, #1d4ed8 0%, #0369a1 100%);
+  --hb-login-submit-hover: linear-gradient(95deg, #1e40af 0%, #075985 100%);
+}
+
+:root[data-theme="sunset"] {
+  --hb-body-bg: #f9f4ee;
+  --hb-body-fg: #2b1f1a;
+  --hb-shell-bg: radial-gradient(1200px 680px at 5% -20%, #ffd8c2 0%, #f9f4ee 45%, #f8eee6 100%);
+
+  --hb-sidebar-from: #5d2e23;
+  --hb-sidebar-via: #7a3d2c;
+  --hb-sidebar-to: #9a5237;
+  --hb-sidebar-border: rgba(255, 220, 194, 0.38);
+  --hb-sidebar-label: #ffe2cf;
+  --hb-sidebar-text: #fff3eb;
+  --hb-sidebar-footer: #ffe8d8;
+
+  --hb-nav-hover-bg: rgba(255, 223, 196, 0.22);
+  --hb-nav-active-bg: rgba(255, 198, 157, 0.35);
+  --hb-nav-ring: rgba(255, 226, 206, 0.5);
+
+  --hb-header-bg: linear-gradient(92deg, #6f3527 0%, #96503a 50%, #c2714c 100%);
+  --hb-header-border: rgba(255, 212, 180, 0.45);
+  --hb-header-text: #fff4ec;
+  --hb-title: #fff9f4;
+
+  --hb-logo-border: #fed7aa;
+  --hb-control-bg: rgba(255, 244, 236, 0.14);
+  --hb-control-border: rgba(255, 226, 206, 0.4);
+  --hb-control-text: #fff4ec;
+  --hb-control-hover: rgba(255, 239, 226, 0.3);
+  --hb-user-text: #fff1e8;
+  --hb-avatar-bg: #fdba74;
+  --hb-avatar-text: #431407;
+
+  --hb-login-overlay: linear-gradient(130deg, rgba(255, 194, 158, 0.22), rgba(254, 215, 170, 0.1));
+  --hb-login-card-bg: rgba(255, 248, 242, 0.83);
+  --hb-login-card-border: rgba(253, 186, 116, 0.5);
+  --hb-login-title: #7c2d12;
+  --hb-login-subtitle: #7c4a33;
+  --hb-login-label: #78350f;
+  --hb-login-input-bg: rgba(255, 255, 255, 0.9);
+  --hb-login-input-border: rgba(251, 191, 132, 0.75);
+  --hb-login-input-text: #431407;
+  --hb-login-input-placeholder: #9a6b51;
+  --hb-login-input-focus: rgba(251, 146, 60, 0.35);
+  --hb-login-submit-bg: linear-gradient(95deg, #c2410c 0%, #b45309 100%);
+  --hb-login-submit-hover: linear-gradient(95deg, #9a3412 0%, #92400e 100%);
+}
+
+:root[data-theme="spruce"] {
+  --hb-body-bg: #eef7f4;
+  --hb-body-fg: #0f2b24;
+  --hb-shell-bg: radial-gradient(1200px 680px at 20% -18%, #cceee2 0%, #eef7f4 45%, #e4f3ed 100%);
+
+  --hb-sidebar-from: #0d3f37;
+  --hb-sidebar-via: #13584b;
+  --hb-sidebar-to: #1a6a58;
+  --hb-sidebar-border: rgba(167, 243, 208, 0.35);
+  --hb-sidebar-label: #c3efe0;
+  --hb-sidebar-text: #e8fff6;
+  --hb-sidebar-footer: #c9f6e5;
+
+  --hb-nav-hover-bg: rgba(153, 246, 212, 0.2);
+  --hb-nav-active-bg: rgba(94, 234, 212, 0.3);
+  --hb-nav-ring: rgba(167, 243, 208, 0.45);
+
+  --hb-header-bg: linear-gradient(92deg, #0f4c42 0%, #1a6a58 52%, #22856b 100%);
+  --hb-header-border: rgba(167, 243, 208, 0.45);
+  --hb-header-text: #ecfff7;
+  --hb-title: #f4fff9;
+
+  --hb-logo-border: #99f6e4;
+  --hb-control-bg: rgba(236, 255, 247, 0.13);
+  --hb-control-border: rgba(167, 243, 208, 0.35);
+  --hb-control-text: #effff8;
+  --hb-control-hover: rgba(220, 252, 236, 0.28);
+  --hb-user-text: #e6fff4;
+  --hb-avatar-bg: #6ee7b7;
+  --hb-avatar-text: #022c22;
+
+  --hb-login-overlay: linear-gradient(130deg, rgba(110, 231, 183, 0.18), rgba(167, 243, 208, 0.09));
+  --hb-login-card-bg: rgba(243, 255, 251, 0.82);
+  --hb-login-card-border: rgba(94, 234, 212, 0.42);
+  --hb-login-title: #065f46;
+  --hb-login-subtitle: #1f4d43;
+  --hb-login-label: #064e3b;
+  --hb-login-input-bg: rgba(255, 255, 255, 0.92);
+  --hb-login-input-border: rgba(94, 234, 212, 0.55);
+  --hb-login-input-text: #03251c;
+  --hb-login-input-placeholder: #4b7e70;
+  --hb-login-input-focus: rgba(20, 184, 166, 0.35);
+  --hb-login-submit-bg: linear-gradient(95deg, #0f766e 0%, #0f766e 40%, #15803d 100%);
+  --hb-login-submit-hover: linear-gradient(95deg, #115e59 0%, #166534 100%);
+}
+
+html.dark {
+  --hb-body-bg: #070f19;
+  --hb-body-fg: #e7efff;
+  --hb-shell-bg: radial-gradient(1300px 720px at 18% -24%, #1b2b45 0%, #070f19 48%, #050c14 100%);
+  --hb-sidebar-border: rgba(147, 197, 253, 0.24);
+  --hb-sidebar-text: #dae8ff;
+  --hb-sidebar-label: #abc4e0;
+  --hb-sidebar-footer: #b7cae2;
+  --hb-nav-hover-bg: rgba(147, 197, 253, 0.15);
+  --hb-nav-active-bg: rgba(125, 211, 252, 0.28);
+  --hb-nav-ring: rgba(147, 197, 253, 0.35);
+  --hb-logo-bg: #0f172a;
+  --hb-logo-border: rgba(147, 197, 253, 0.35);
+  --hb-control-bg: rgba(148, 163, 184, 0.16);
+  --hb-control-border: rgba(148, 163, 184, 0.4);
+  --hb-control-hover: rgba(148, 163, 184, 0.28);
+  --hb-control-text: #e2e8f0;
+  --hb-user-text: #dbeafe;
+  --hb-content-bg: transparent;
+
+  --hb-login-overlay: linear-gradient(130deg, rgba(51, 65, 85, 0.35), rgba(15, 23, 42, 0.2));
+  --hb-login-card-bg: rgba(15, 23, 42, 0.8);
+  --hb-login-card-border: rgba(147, 197, 253, 0.26);
+  --hb-login-title: #dbeafe;
+  --hb-login-subtitle: #cbd5e1;
+  --hb-login-label: #cbd5e1;
+  --hb-login-input-bg: rgba(30, 41, 59, 0.75);
+  --hb-login-input-border: rgba(100, 116, 139, 0.55);
+  --hb-login-input-text: #f1f5f9;
+  --hb-login-input-placeholder: #94a3b8;
+  --hb-login-input-focus: rgba(125, 211, 252, 0.35);
+  --hb-login-submit-bg: linear-gradient(95deg, #2563eb 0%, #0e7490 100%);
+  --hb-login-submit-hover: linear-gradient(95deg, #1d4ed8 0%, #155e75 100%);
+}
+
 /* Global enterprise palette */
 body {
-  background-color: #f1f5f9;
+  background: var(--hb-shell-bg);
+  background-color: var(--hb-body-bg);
+  color: var(--hb-body-fg);
+}
+
+.hb-shell {
+  display: flex;
+  min-height: 100vh;
+  background: transparent;
+}
+
+.hb-sidebar {
+  width: 16rem;
+  display: flex;
+  flex-direction: column;
+  color: var(--hb-sidebar-text);
+  border-right: 1px solid var(--hb-sidebar-border);
+  background-image: linear-gradient(180deg, var(--hb-sidebar-from), var(--hb-sidebar-via), var(--hb-sidebar-to));
+}
+
+.hb-sidebar-head {
+  border-bottom: 1px solid var(--hb-sidebar-border);
+  padding: 1rem 1.25rem;
+}
+
+.hb-sidebar-label {
+  color: var(--hb-sidebar-label);
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+
+.hb-sidebar-footer {
+  border-top: 1px solid var(--hb-sidebar-border);
+  color: var(--hb-sidebar-footer);
+  font-size: 0.75rem;
+  padding: 0.75rem 1.5rem;
+}
+
+.hb-nav-link {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+.hb-nav-link-idle {
+  color: var(--hb-sidebar-text);
+}
+
+.hb-nav-link-idle:hover {
+  background-color: var(--hb-nav-hover-bg);
+}
+
+.hb-nav-link-active {
+  color: #ffffff;
+  background-color: var(--hb-nav-active-bg);
+  box-shadow: inset 0 0 0 1px var(--hb-nav-ring);
+}
+
+.hb-main {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--hb-main-bg);
+}
+
+.hb-header {
+  align-items: center;
+  background: var(--hb-header-bg);
+  border-bottom: 1px solid var(--hb-header-border);
+  color: var(--hb-header-text);
+  display: flex;
+  justify-content: space-between;
+  padding: 1rem 2rem;
+}
+
+.hb-logo-wrap {
+  display: inline-flex;
+  border-radius: 0.4rem;
+  border: 1px solid var(--hb-logo-border);
+  background: var(--hb-logo-bg);
+  padding: 0.25rem;
+  box-shadow: 0 5px 18px rgba(15, 23, 42, 0.12);
+}
+
+.hb-title {
+  color: var(--hb-title);
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.hb-theme-select {
+  border-radius: 0.4rem;
+  border: 1px solid var(--hb-control-border);
+  background: var(--hb-control-bg);
+  color: var(--hb-control-text);
+  font-size: 0.8rem;
+  padding: 0.45rem 0.5rem;
+}
+
+.hb-theme-select option {
   color: #0f172a;
+}
+
+.hb-icon-btn,
+.hb-logout-btn {
+  border-radius: 0.4rem;
+  border: 1px solid var(--hb-control-border);
+  color: var(--hb-control-text);
+  background: var(--hb-control-bg);
+}
+
+.hb-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.5rem;
+}
+
+.hb-logout-btn {
+  font-size: 0.75rem;
+  padding: 0.35rem 0.7rem;
+}
+
+.hb-icon-btn:hover,
+.hb-logout-btn:hover {
+  background: var(--hb-control-hover);
+}
+
+.hb-user-name {
+  color: var(--hb-user-text);
+  font-size: 0.875rem;
+}
+
+.hb-avatar {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 9999px;
+  background: var(--hb-avatar-bg);
+  color: var(--hb-avatar-text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+}
+
+.hb-content {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  background: var(--hb-content-bg);
+}
+
+.hb-login-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  position: relative;
+  background: var(--hb-shell-bg);
+}
+
+.hb-login-glow {
+  position: absolute;
+  inset: 0;
+  background: var(--hb-login-overlay);
+  pointer-events: none;
+}
+
+.hb-login-card {
+  width: 100%;
+  max-width: 28rem;
+  position: relative;
+  border-radius: 1rem;
+  border: 1px solid var(--hb-login-card-border);
+  background: var(--hb-login-card-bg);
+  backdrop-filter: blur(8px);
+  padding: 1.75rem;
+  box-shadow: 0 16px 48px rgba(15, 23, 42, 0.2);
+}
+
+.hb-login-logo {
+  margin-bottom: 1rem;
+  display: inline-flex;
+  border-radius: 0.5rem;
+  border: 1px solid var(--hb-logo-border);
+  background: var(--hb-logo-bg);
+  padding: 0.3rem;
+}
+
+.hb-login-title {
+  margin-bottom: 0.25rem;
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: var(--hb-login-title);
+}
+
+.hb-login-subtitle {
+  margin-bottom: 1.3rem;
+  color: var(--hb-login-subtitle);
+  font-size: 0.9rem;
+}
+
+.hb-login-label {
+  display: block;
+  margin-bottom: 0.3rem;
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--hb-login-label);
+}
+
+.hb-login-input {
+  width: 100%;
+  border-radius: 0.5rem;
+  border: 1px solid var(--hb-login-input-border);
+  background: var(--hb-login-input-bg);
+  color: var(--hb-login-input-text);
+  padding: 0.52rem 0.75rem;
+  font-size: 0.9rem;
+  outline: none;
+}
+
+.hb-login-input::placeholder {
+  color: var(--hb-login-input-placeholder);
+}
+
+.hb-login-input:focus {
+  box-shadow: 0 0 0 3px var(--hb-login-input-focus);
+}
+
+.hb-login-error {
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  border-radius: 0.5rem;
+  background: rgba(254, 242, 242, 0.75);
+  color: #b91c1c;
+  font-size: 0.84rem;
+  padding: 0.5rem 0.7rem;
+}
+
+.hb-login-submit {
+  width: 100%;
+  border: 0;
+  border-radius: 0.55rem;
+  padding: 0.6rem;
+  color: #ffffff;
+  font-weight: 600;
+  background: var(--hb-login-submit-bg);
+}
+
+.hb-login-submit:hover {
+  background: var(--hb-login-submit-hover);
+}
+
+.hb-login-submit:disabled {
+  opacity: 0.6;
 }
 
 .bg-white {
@@ -37,6 +474,12 @@ html.dark .bg-white {
   background-color: #0f172a;
 }
 
+html.dark .from-white {
+  --tw-gradient-from: #0f172a var(--tw-gradient-from-position);
+  --tw-gradient-to: rgb(15 23 42 / 0) var(--tw-gradient-to-position);
+  --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to);
+}
+
 html.dark .bg-gray-50 {
   background-color: #111827;
 }
@@ -59,6 +502,10 @@ html.dark .text-gray-700,
 html.dark .text-gray-600,
 html.dark .text-gray-500 {
   color: #cbd5e1;
+}
+
+html.dark .text-gray-400 {
+  color: #94a3b8;
 }
 
 html.dark .text-slate-700,
@@ -94,8 +541,70 @@ html.dark .to-cyan-50 {
   --tw-gradient-to: #020617 var(--tw-gradient-to-position);
 }
 
+html.dark .to-gray-50 {
+  --tw-gradient-to: #111827 var(--tw-gradient-to-position);
+}
+
 html.dark .hover\:bg-gray-50:hover,
 html.dark .hover\:bg-gray-100:hover,
 html.dark .hover\:bg-gray-200:hover {
   background-color: #1e293b;
+}
+
+/* Dark mode form controls: keep inputs/selects readable across all pages. */
+html.dark input:not([type="checkbox"]):not([type="radio"]),
+html.dark select,
+html.dark textarea {
+  background-color: #0f172a;
+  border-color: #334155;
+  color: #e2e8f0;
+}
+
+html.dark input::placeholder,
+html.dark textarea::placeholder {
+  color: #94a3b8;
+}
+
+html.dark input:disabled,
+html.dark select:disabled,
+html.dark textarea:disabled {
+  background-color: #111827;
+  color: #94a3b8;
+  opacity: 1;
+}
+
+/* Dark mode chart theming for Recharts (axes, tooltip, and grid). */
+html.dark .recharts-cartesian-axis-tick-value,
+html.dark .recharts-text,
+html.dark .recharts-legend-item-text {
+  fill: #cbd5e1 !important;
+}
+
+html.dark .recharts-cartesian-grid-horizontal line,
+html.dark .recharts-cartesian-grid-vertical line {
+  stroke: #334155 !important;
+}
+
+html.dark .recharts-default-tooltip {
+  background-color: #0f172a !important;
+  border: 1px solid #334155 !important;
+}
+
+html.dark .recharts-tooltip-label,
+html.dark .recharts-tooltip-item {
+  color: #e2e8f0 !important;
+}
+
+@media (max-width: 1024px) {
+  .hb-shell {
+    flex-direction: column;
+  }
+
+  .hb-sidebar {
+    width: 100%;
+  }
+
+  .hb-header {
+    padding: 0.8rem 1rem;
+  }
 }

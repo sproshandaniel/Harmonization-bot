@@ -24,7 +24,7 @@ load_dotenv(dotenv_path=BASE_DIR / ".env", override=True)
 
 _OPENAI_CLIENT = None
 _OPENAI_CLIENT_KEY = ""
-ALLOWED_RULE_TYPES = {"code", "design", "naming", "performance", "template", "wizard"}
+ALLOWED_RULE_TYPES = {"code", "design", "template", "wizard"}
 ALLOWED_SEVERITIES = {"MAJOR", "MINOR", "INFO"}
 CODE_SUBTAGS = ("code", "naming", "performance")
 

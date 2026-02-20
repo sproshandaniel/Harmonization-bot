@@ -19,6 +19,7 @@ class BotAssistIn(BaseModel):
     transport: str = "ADT"
     top_k: int = Field(default=5, ge=1, le=10)
     log_violations: bool = True
+    llm_fallback_confirmed: bool = False
 
 
 @router.post("/bot/assist")
@@ -38,6 +39,7 @@ def bot_assist(request: Request, payload: BotAssistIn | None = None):
         created_by=user,
         top_k=payload.top_k,
         log_violations=payload.log_violations,
+        llm_fallback_confirmed=payload.llm_fallback_confirmed,
     )
 
 
