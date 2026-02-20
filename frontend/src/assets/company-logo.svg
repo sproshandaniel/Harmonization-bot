@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 220" role="img" aria-label="Company logo">
+  <defs>
+    <linearGradient id="blueA" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#2fb3e6" />
+      <stop offset="100%" stop-color="#1b8fcb" />
+    </linearGradient>
+    <linearGradient id="blueB" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0f58b4" />
+      <stop offset="100%" stop-color="#0b4da1" />
+    </linearGradient>
+    <linearGradient id="orange" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ff7a1a" />
+      <stop offset="100%" stop-color="#ef5b00" />
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="220" height="220" fill="#ffffff" />
+
+  <path
+    d="M145 206c-58 8-112-28-126-84C5 66 42 15 96 6c36-6 70 8 93 35-46-18-98 4-118 50-22 51 1 110 52 133 8 4 15 6 22 8z"
+    fill="url(#blueA)"
+  />
+  <path
+    d="M111 22c54 1 98 46 98 100 0 39-23 73-56 89 18-23 24-55 13-85-17-50-71-76-121-59-6 2-12 5-18 8 15-33 48-54 84-53z"
+    fill="url(#blueB)"
+  />
+  <path
+    d="M204 76c13 44-7 92-47 114-27 14-57 14-82 2 22 2 45-6 61-22 30-30 30-78 0-108-4-4-8-7-13-10 38-2 73 21 81 60z"
+    fill="url(#orange)"
+  />
+  <circle cx="106" cy="110" r="45" fill="#ffffff" />
+</svg>

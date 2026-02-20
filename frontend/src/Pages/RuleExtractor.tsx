@@ -4,7 +4,6 @@ import {
   FileText,
   Wand2,
   Filter,
-  Check,
   X,
   Edit3,
   Save,
@@ -29,13 +28,21 @@ function LoadingOverlay() {
 type RuleResult = {
   yaml: string;
   confidence: number;
-  category?: "code" | "design" | "naming" | "performance" | "template";
+  category?: "code" | "design" | "template" | "wizard";
+  subtags?: string[];
   duplicate_of?: string | null;
   similarity?: number | null;
   source_snippet?: string;
-  status?: "new" | "approved" | "edited" | "discarded";
+  status?: "new" | "approved" | "edited" | "discarded" | "saved";
   _severity?: string;
   _id?: string;
+};
+
+type RuleTestResult = {
+  ok: boolean;
+  passed: boolean;
+  message: string;
+  detail?: string;
 };
 
 type Project = {
@@ -44,42 +51,39 @@ type Project = {
   description?: string;
 };
 
-// --- DEFAULT DEMO PROJECTS ---
-const mockProjects: Project[] = [
-  {
-    id: "mfp-hcm-core",
-    name: "MFP Development",
-    description: "Peoplehub application development.",
-  },
-  {
-    id: "abap_prog",
-    name: "ABAP Programming",
-    description: "ABAP HR Programming.",
-  },
-  {
-    id: "s4_conv",
-    name: "S/4HANA Migration",
-    description: "Migration of code to S/4 HANA.",
-  },
-];
+type AvailablePack = {
+  name: string;
+};
 
-export default function RuleExtractor() {
+type RuleExtractorProps = {
+  onRuleSaved?: () => void;
+};
+
+const MULTI_EXTRACT_TYPES = ["code", "design", "template"] as const;
+
+export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
   const [text, setText] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<RuleResult[]>([]);
-  const [pack, setPack] = useState<string>("abap-core-standards");
   const [filter, setFilter] = useState<{ category?: string; q?: string }>({});
   const [ruleType, setRuleType] = useState<string>("code");
+  const [multiRuleTypes, setMultiRuleTypes] = useState<string[]>(["code"]);
+  const [wizardName, setWizardName] = useState<string>("");
+  const [wizardDescription, setWizardDescription] = useState<string>("");
+  const [wizardTotalSteps, setWizardTotalSteps] = useState<number>(3);
+  const [wizardStepTitle, setWizardStepTitle] = useState<string>("");
+  const [wizardStepDescription, setWizardStepDescription] = useState<string>("");
+  const [wizardNextStepNo, setWizardNextStepNo] = useState<number>(1);
+  const [maxRules, setMaxRules] = useState<number>(5);
   const [rulePackOptions, setRulePackOptions] = useState<string[]>([]);
   const [rulePack, setRulePack] = useState<string>("");
-  const [user, setUser] = useState<string>("Architect User");
+  const createdBy = localStorage.getItem("hb_user_email") || "name@zalaris.com";
+  const [extractError, setExtractError] = useState<string | null>(null);
 
   // Projects (initialized with demo values)
-  const [projects, setProjects] = useState<Project[]>(mockProjects);
-  const [selectedProjectId, setSelectedProjectId] = useState<string>(
-    mockProjects[0]?.id ?? ""
-  );
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string>("");
   const [loadingProjects, setLoadingProjects] = useState(false);
   const [loadingProjectRules, setLoadingProjectRules] = useState(false);
 
@@ -87,16 +91,25 @@ export default function RuleExtractor() {
   const [editorIdx, setEditorIdx] = useState<number | null>(null);
   const [editorValue, setEditorValue] = useState<string>("");
   const [editorError, setEditorError] = useState<string | null>(null);
+  const [noticeOpen, setNoticeOpen] = useState(false);
+  const [noticeMessage, setNoticeMessage] = useState("");
+  const [saveSuccessOpen, setSaveSuccessOpen] = useState(false);
+  const [saveSuccessMessage, setSaveSuccessMessage] = useState("");
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [testCodeByIndex, setTestCodeByIndex] = useState<Record<number, string>>({});
+  const [testResultByIndex, setTestResultByIndex] = useState<Record<number, RuleTestResult>>({});
+  const [testingIndex, setTestingIndex] = useState<number | null>(null);
 
   const filtered = useMemo(() => {
-    return results.filter((r) => {
+    return results
+      .map((r, index) => ({ r, index }))
+      .filter(({ r }) => {
       const matchesCat = filter.category ? r.category === filter.category : true;
       const matchesQuery = filter.q
         ? r.yaml.toLowerCase().includes(filter.q.toLowerCase())
         : true;
       return matchesCat && matchesQuery && r.status !== "discarded";
-    });
+      });
   }, [results, filter]);
 
   const selectedProject = useMemo(
@@ -104,26 +117,26 @@ export default function RuleExtractor() {
     [projects, selectedProjectId]
   );
 
-  // --------- Load projects from backend (if available) ----------
+  function showNotice(message: string) {
+    setNoticeMessage(message);
+    setNoticeOpen(true);
+  }
+
+  // --------- Load projects from backend ----------
   useEffect(() => {
     const loadProjects = async () => {
       try {
         setLoadingProjects(true);
         const res = await fetch("/api/projects");
-        if (!res.ok) {
-          // Backend not ready or returns error – keep mock projects
-          console.warn(
-            `Projects API not available (${res.status}), using demo projects`
-          );
-          return;
-        }
+        if (!res.ok) throw new Error(`Projects API failed (${res.status})`);
         const data: Project[] = await res.json();
         if (data && data.length > 0) {
           setProjects(data);
           setSelectedProjectId(data[0].id);
         }
       } catch (err) {
-        console.warn("Error loading projects, using demo projects", err);
+        const message = err instanceof Error ? err.message : "Error loading projects.";
+        showNotice(message);
       } finally {
         setLoadingProjects(false);
       }
@@ -131,167 +144,88 @@ export default function RuleExtractor() {
     loadProjects();
   }, []);
 
-  // --------- Load rules when project changes ----------
+  // --------- Keep extractor results session-only ----------
   useEffect(() => {
-    const loadRulesForProject = async () => {
-      if (!selectedProjectId) {
-        setResults([]);
-        return;
-      }
-      try {
-        setLoadingProjectRules(true);
-        const res = await fetch(`/api/projects/${selectedProjectId}/rules`);
-        if (!res.ok) {
-          console.warn(
-            `Rules API for project ${selectedProjectId} not available (${res.status}), keeping existing rules`
-          );
-          return;
-        }
-        const data = await res.json();
-        const rawRules: RuleResult[] = Array.isArray(data)
-          ? data
-          : data.rules || [];
-        const tagged = rawRules.map(tagDerived);
-        setResults(tagged.map((r) => ({ status: "approved", ...r })));
-      } catch (err) {
-        console.warn("Error loading project rules, keeping existing rules", err);
-      } finally {
-        setLoadingProjectRules(false);
-      }
-    };
-
-    loadRulesForProject();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    setLoadingProjectRules(false);
+    setResults([]);
+    setExpanded(new Set());
+    setTestCodeByIndex({});
+    setTestResultByIndex({});
+    setWizardNextStepNo(1);
   }, [selectedProjectId]);
 
-  // --- DEMO HELPERS: MOCK RULES FOR CODE & DOCUMENT -----------------------
-
-  function generateMockCodeRules(
-    sourceText: string,
-    ruleType: string,
-    rulePack: string
-  ): RuleResult[] {
-    const snippet =
-      sourceText && sourceText.trim().length > 0
-        ? sourceText.slice(0, 260)
-        : "SELECT * FROM pa0001 INTO TABLE lt_pa0001.";
-
-    const packName = rulePack || "abap-core-standards";
-
-    const yaml1 = [
-      "id: ABAP.PERF.SELECT_IN_LOOP",
-      'name: "Avoid SELECT inside LOOP"',
-      "type: performance",
-      "severity: MAJOR",
-      `pack: ${packName}`,
-      'message: "Database SELECT inside LOOP/DO/WHILE can cause severe performance issues."',
-      "pattern:",
-      "  language: ABAP",
-      '  match: "SELECT .* FROM .*"',
-      "",
-    ].join("\n");
-
-    const yaml2 = [
-      "id: ABAP.EXCP.TRY_CATCH_ARITH",
-      'name: "Wrap arithmetic in TRY...CATCH"',
-      "type: code",
-      "severity: MINOR",
-      `pack: ${packName}`,
-      'message: "Arithmetic that can overflow or divide by zero must be inside TRY...CATCH."',
-      "pattern:",
-      "  language: ABAP",
-      '  match: "= .*[+\\-*/].*"',
-      "",
-    ].join("\n");
-
-    return [
-      {
-        yaml: yaml1,
-        confidence: 0.92,
-        category: "performance",
-        source_snippet: snippet,
-        status: "new",
-      },
-      {
-        yaml: yaml2,
-        confidence: 0.88,
-        category: "code",
-        source_snippet: snippet,
-        status: "new",
-      },
-    ];
-  }
-
-  function generateMockDocumentRules(
-    file: File,
-    ruleType: string,
-    rulePack: string
-  ): RuleResult[] {
-    const packName = rulePack || "architecture-guidelines";
-
-    const yaml1 = [
-      "id: ABAP.NAMING.ZCL_PREFIX",
-      'name: "Public classes must start with ZCL_"',
-      "type: naming",
-      "severity: MAJOR",
-      `pack: ${packName}`,
-      'message: "All custom global classes must use prefix ZCL_ followed by a meaningful name."',
-      "",
-    ].join("\n");
-
-    const yaml2 = [
-      "id: ABAP.DESIGN.SINGLETON_LOGGER",
-      'name: "Use singleton for shared logging service"',
-      "type: design",
-      "severity: MINOR",
-      `pack: ${packName}`,
-      'message: "Shared logging component should be implemented as a singleton to avoid multiple instances."',
-      "",
-    ].join("\n");
-
-    const snippet = `Extracted from uploaded document: ${file.name}`;
-
-    return [
-      {
-        yaml: yaml1,
-        confidence: 0.9,
-        category: "naming",
-        source_snippet: snippet,
-        status: "new",
-      },
-      {
-        yaml: yaml2,
-        confidence: 0.86,
-        category: "design",
-        source_snippet: snippet,
-        status: "new",
-      },
-    ];
-  }
-
-  // --------- Extract rules (backend + demo fallback) ----------
+  // --------- Extract rules (backend only) ----------
 
   async function extractRules() {
     if (!selectedProjectId) {
-      alert("Please select a project before extracting rules.");
+      showNotice("Please select a project before extracting rules.");
       return;
     }
+
+    const currentWizardSteps = results.filter(
+      (r) => r.category === "wizard" && r.status !== "discarded"
+    ).length;
+    const derivedNextStepNo =
+      ruleType === "wizard" ? currentWizardSteps + 1 : 1;
 
     if (!text && !file) {
-      alert("Please paste some code or upload a document.");
+      showNotice("Please paste some code or upload a document.");
       return;
     }
-
+    if (ruleType === "wizard" && !wizardName.trim()) {
+      showNotice("Please enter a wizard name.");
+      return;
+    }
+    if (ruleType === "wizard" && !wizardDescription.trim()) {
+      showNotice("Please enter a wizard description.");
+      return;
+    }
+    if (ruleType === "wizard" && wizardTotalSteps < 1) {
+      showNotice("Please enter a total step count (min 1).");
+      return;
+    }
+    if (ruleType === "wizard" && derivedNextStepNo > wizardTotalSteps) {
+      showNotice("All wizard steps have already been extracted.");
+      return;
+    }
+    if (ruleType === "wizard" && !wizardStepTitle.trim()) {
+      showNotice("Please enter a step title.");
+      return;
+    }
+    if (ruleType === "wizard" && !wizardStepDescription.trim()) {
+      showNotice("Please enter a step description.");
+      return;
+    }
+    if (ruleType === "multi" && multiRuleTypes.length === 0) {
+      showNotice("Please select at least one rule type for multi extraction.");
+      return;
+    }
     setLoading(true);
+    setExtractError(null);
 
-    // 1. Try backend as-is
     try {
       const form = new FormData();
       if (file) form.append("file", file);
       else form.append("text", text);
-      form.append("rule_type", ruleType);
+      form.append("rule_type", ruleType === "multi" ? "code" : ruleType);
+      if (ruleType === "multi") {
+        form.append("rule_types", multiRuleTypes.join(","));
+      }
+      const effectiveMaxRules = ruleType === "wizard" ? 1 : maxRules;
+      form.append("max_rules", String(effectiveMaxRules));
+      if (ruleType === "template" || (ruleType === "multi" && multiRuleTypes.includes("template"))) {
+        form.append("template_use_ai", "true");
+      }
+      if (ruleType === "wizard") {
+        form.append("wizard_name", wizardName.trim());
+        form.append("wizard_description", wizardDescription.trim());
+        form.append("wizard_total_steps", String(wizardTotalSteps));
+        form.append("wizard_step_no", String(derivedNextStepNo));
+        form.append("wizard_step_title", wizardStepTitle.trim());
+        form.append("wizard_step_description", wizardStepDescription.trim());
+      }
       form.append("rule_pack", rulePack);
-      form.append("created_by", user);
+      form.append("created_by", createdBy);
       form.append("project_id", selectedProjectId);
 
       const res = await fetch(
@@ -310,41 +244,47 @@ export default function RuleExtractor() {
           : [];
 
         if (rawRules.length > 0) {
-          const rules = rawRules.map(tagDerived);
-          setResults(rules.map((r) => ({ status: "new", ...r })));
-          setLoading(false);
-          return;
-        } else {
-          console.warn(
-            "Backend returned no rules, falling back to demo rules."
+          const rules = rawRules.map((r) => {
+            if (ruleType === "wizard") {
+              const wizardYaml = mergeWizardMeta(r.yaml, derivedNextStepNo);
+              return tagDerived({ ...r, yaml: wizardYaml, category: "wizard" });
+            }
+            if (ruleType === "multi") {
+              return tagDerived({ ...r });
+            }
+            const forcedYaml = forceTypeInYaml(r.yaml, ruleType);
+            return tagDerived({ ...r, yaml: forcedYaml, category: ruleType as RuleResult["category"] });
+          });
+          const newRules: RuleResult[] = rules.map(
+            (r): RuleResult => ({ ...r, status: "new" })
           );
+          if (ruleType === "wizard") {
+            setResults((prev) => [...prev, ...newRules]);
+          } else {
+            setResults(newRules);
+          }
+          if (ruleType === "wizard") {
+            setWizardNextStepNo(derivedNextStepNo + 1);
+            setWizardStepTitle("");
+            setWizardStepDescription("");
+          }
+          return;
         }
-      } else {
-        console.warn(
-          `Backend responded with ${res.status}, falling back to demo rules.`
-        );
+
+        setResults([]);
+        setExtractError("No rules returned from the backend.");
+        return;
       }
-    } catch (e) {
-      console.error("Extraction failed. Falling back to demo rules.", e);
+
+      const errText = await res.text();
+      setExtractError(
+        `Extraction failed (${res.status}). ${errText || "Backend error."}`
+      );
+    } catch (e: any) {
+      setExtractError(e?.message || "Extraction failed. Backend not reachable.");
     } finally {
       setLoading(false);
     }
-
-    // 2. DEMO fallback: generate mock rules (no popup)
-    let mockRules: RuleResult[];
-    if (file) {
-      mockRules = generateMockDocumentRules(file, ruleType, rulePack);
-    } else {
-      mockRules = generateMockCodeRules(text, ruleType, rulePack);
-    }
-    const tagged = mockRules.map(tagDerived);
-    setResults(tagged.map((r) => ({ status: "new", ...r })));
-  }
-
-  function approveRule(idx: number) {
-    setResults((prev) =>
-      prev.map((r, i) => (i === idx ? { ...r, status: "approved" } : r))
-    );
   }
 
   function discardRule(idx: number) {
@@ -384,64 +324,198 @@ export default function RuleExtractor() {
     setEditorOpen(false);
   }
 
-  function getRulePacksForType(type: string): string[] {
-    switch (type) {
-      case "code":
-        return [
-          "abap-core-safety",
-          "abap-core-exception",
-          "abap-db-standards",
-          "abap-unit-tests",
-          "abap-core-syntax",
-        ];
-      case "design":
-        return ["architecture-guidelines", "design-patterns"];
-      case "naming":
-        return ["naming-standards", "package-prefixes"];
-      case "performance":
-        return [
-          "performance-optimizations",
-          "sql-guidelines",
-          "abap-core-performance",
-        ];
-      case "template":
-        return ["code-templates", "developer-snippets"];
-      default:
-        return ["generic"];
-    }
-  }
-
   useEffect(() => {
-    setRulePackOptions(getRulePacksForType(ruleType));
-    setRulePack("");
+    const loadRulePackOptions = async () => {
+      try {
+        const optionsEndpoint =
+          ruleType === "multi"
+            ? "/api/rule-pack-options/all"
+            : `/api/rule-pack-options?rule_type=${encodeURIComponent(ruleType)}`;
+        const [optionsRes, packsRes] = await Promise.all([
+          fetch(optionsEndpoint),
+          fetch("/api/packs"),
+        ]);
+        if (!optionsRes.ok) {
+          throw new Error(`Rule pack options API failed (${optionsRes.status})`);
+        }
+        if (!packsRes.ok) {
+          throw new Error(`Rule packs API failed (${packsRes.status})`);
+        }
+        const optionsData = await optionsRes.json();
+        const packsData = await packsRes.json();
+        const typeOptions: string[] =
+          ruleType === "multi"
+            ? Array.isArray(optionsData?.items)
+              ? optionsData.items.map((x: any) => String(x.pack_name || "").trim()).filter(Boolean)
+              : []
+            : Array.isArray(optionsData?.options)
+            ? optionsData.options
+            : [];
+        const availablePacks: string[] = Array.isArray(packsData?.packs)
+          ? (packsData.packs as AvailablePack[]).map((p) => String(p.name || "").trim()).filter(Boolean)
+          : [];
+
+        const merged = Array.from(new Set([...typeOptions, ...availablePacks])).sort((a, b) =>
+          a.localeCompare(b)
+        );
+        setRulePackOptions(merged);
+        setRulePack((prev) => {
+          if (prev && merged.includes(prev)) return prev;
+          return merged[0] || "";
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to load rule pack options.";
+        showNotice(message);
+        setRulePackOptions([]);
+        setRulePack("");
+      }
+    };
+    void loadRulePackOptions();
   }, [ruleType]);
 
-  async function saveApprovedToPack() {
-    const approved = results.filter(
-      (r) => r.status === "approved" || r.status === "edited"
-    );
-    if (!approved.length) return alert("No approved rules to save.");
+  useEffect(() => {
+    if (ruleType === "template") {
+      setMaxRules(1);
+    }
+  }, [ruleType]);
+
+  useEffect(() => {
+    if (ruleType !== "multi") {
+      return;
+    }
+    setMultiRuleTypes((prev) => (prev.length > 0 ? prev : ["code"]));
+  }, [ruleType]);
+
+  useEffect(() => {
+    if (ruleType !== "wizard") {
+      setWizardName("");
+      setWizardDescription("");
+      setWizardTotalSteps(3);
+      setWizardStepTitle("");
+      setWizardStepDescription("");
+      setWizardNextStepNo(1);
+    }
+  }, [ruleType]);
+
+  async function saveSingleRule(idx: number) {
+    if (!selectedProjectId) {
+      showNotice("Please select a project.");
+      return;
+    }
+    const rule = results[idx];
     try {
-      const res = await fetch(`/api/packs`, {
+      const res = await fetch(`/api/projects/${selectedProjectId}/rules`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: pack,
-          status: "draft",
-          project_id: selectedProjectId || undefined,
-          rules: approved.map((r) => {
-            try {
-              return yaml.load(r.yaml);
-            } catch {
-              return { _raw: r.yaml };
-            }
-          }),
+          yaml: rule.yaml,
+          confidence: rule.confidence,
+          category: rule.category,
+          _id: rule._id,
+          _severity: rule._severity,
+          created_by: createdBy,
+          rule_pack: rulePack || "manual",
         }),
       });
       if (!res.ok) throw new Error(await res.text());
-      alert(`Saved ${approved.length} rule(s) to pack "${pack}".`);
-    } catch (e: any) {
-      alert(`Save failed: ${e.message}`);
+      setResults((prev) => prev.filter((_, i) => i !== idx));
+      setSaveSuccessMessage("Rule saved successfully.");
+      setSaveSuccessOpen(true);
+      onRuleSaved?.();
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Save failed";
+      showNotice(message);
+    }
+  }
+
+  async function saveWizard() {
+    if (!selectedProjectId) {
+      showNotice("Please select a project.");
+      return;
+    }
+    if (!wizardName.trim()) {
+      showNotice("Please enter a wizard name.");
+      return;
+    }
+    if (!wizardDescription.trim()) {
+      showNotice("Please enter a wizard description.");
+      return;
+    }
+    if (wizardTotalSteps < 1) {
+      showNotice("Please enter a total step count (min 1).");
+      return;
+    }
+
+    const wizardSteps = results.filter(
+      (r) => r.category === "wizard" && r.status !== "discarded"
+    );
+    if (wizardSteps.length === 0) {
+      showNotice("No wizard steps to save.");
+      return;
+    }
+
+    try {
+      const res = await fetch("/api/wizards", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          project_id: selectedProjectId,
+          wizard_name: wizardName.trim(),
+          wizard_description: wizardDescription.trim(),
+          total_steps: wizardTotalSteps,
+          rule_pack: rulePack || "wizard",
+          steps: wizardSteps.map((r) => ({
+            yaml: r.yaml,
+            confidence: r.confidence,
+            category: r.category,
+            _id: r._id,
+            _severity: r._severity,
+          })),
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      setSaveSuccessMessage(
+        `Wizard saved with id ${data?.wizard_id || "unknown"}.`
+      );
+      setSaveSuccessOpen(true);
+      setResults([]);
+      setWizardNextStepNo(1);
+      onRuleSaved?.();
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Save failed";
+      showNotice(message);
+    }
+  }
+
+  async function testRule(idx: number) {
+    const rule = results[idx];
+    const testCode = (testCodeByIndex[idx] || "").trim();
+    if (!testCode) {
+      showNotice("Enter code to test.");
+      return;
+    }
+    try {
+      setTestingIndex(idx);
+      const res = await fetch("/api/rules/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          rule_yaml: rule.yaml,
+          code: testCode,
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = (await res.json()) as RuleTestResult;
+      setTestResultByIndex((prev) => ({ ...prev, [idx]: data }));
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Test failed";
+      setTestResultByIndex((prev) => ({
+        ...prev,
+        [idx]: { ok: false, passed: false, message },
+      }));
+    } finally {
+      setTestingIndex(null);
     }
   }
 
@@ -464,8 +538,8 @@ export default function RuleExtractor() {
           };
 
           return tagDerived(updated);
-        } catch (e) {
-          console.warn("Failed to update severity in YAML", e);
+        } catch {
+          showNotice("Failed to update severity in YAML.");
           return {
             ...r,
             _severity: newSeverity,
@@ -479,14 +553,54 @@ export default function RuleExtractor() {
   function tagDerived(r: RuleResult): RuleResult {
     try {
       const obj: any = yaml.load(r.yaml);
+      const normalizedSubtags = (() => {
+        const raw = obj?.subtags;
+        if (Array.isArray(raw)) {
+          return raw
+            .map((x: unknown) => String(x || "").trim().toLowerCase())
+            .filter((x: string) => ["code", "naming", "performance"].includes(x));
+        }
+        return [];
+      })();
       return {
         ...r,
         _id: obj?.id,
         _severity: obj?.severity,
         category: obj?.type ?? r.category,
+        subtags: normalizedSubtags,
       };
     } catch {
       return r;
+    }
+  }
+
+  function forceTypeInYaml(yamlText: string, forcedType: string): string {
+    try {
+      const obj: any = yaml.load(yamlText) || {};
+      obj.type = forcedType;
+      return yaml.dump(obj, { lineWidth: 120 });
+    } catch {
+      return yamlText;
+    }
+  }
+
+  function mergeWizardMeta(yamlText: string, stepNo: number): string {
+    try {
+      const obj: any = yaml.load(yamlText) || {};
+      obj.type = "wizard";
+      const wizard = typeof obj.wizard === "object" && obj.wizard ? obj.wizard : {};
+      wizard.wizard_name = wizardName.trim();
+      wizard.wizard_description = wizardDescription.trim();
+      wizard.total_steps = wizardTotalSteps;
+      wizard.step_no = stepNo;
+      wizard.step_title = wizardStepTitle.trim();
+      wizard.step_description = wizardStepDescription.trim();
+      obj.wizard = wizard;
+      if (!obj.title) obj.title = wizardStepTitle.trim();
+      if (!obj.description) obj.description = wizardStepDescription.trim();
+      return yaml.dump(obj, { lineWidth: 120 });
+    } catch {
+      return yamlText;
     }
   }
 
@@ -539,14 +653,40 @@ export default function RuleExtractor() {
               >
                 <option value="code">Code</option>
                 <option value="design">Design</option>
-                <option value="naming">Naming</option>
-                <option value="performance">Performance</option>
                 <option value="template">Template</option>
+                <option value="multi">Multi Type</option>
+                <option value="wizard">Wizard</option>
               </select>
             </div>
           </div>
 
-          {/* Rule Pack + User */}
+          {ruleType === "multi" && (
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-2">
+                Multi Rule Types
+              </label>
+              <div className="grid grid-cols-2 gap-2 text-sm">
+                {MULTI_EXTRACT_TYPES.map((t) => (
+                  <label key={t} className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={multiRuleTypes.includes(t)}
+                      onChange={(e) =>
+                        setMultiRuleTypes((prev) =>
+                          e.target.checked
+                            ? Array.from(new Set([...prev, t]))
+                            : prev.filter((x) => x !== t)
+                        )
+                      }
+                    />
+                    <span className="capitalize">{t}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Rule Pack + Max Rules */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-semibold text-gray-700 mb-1">
@@ -567,20 +707,92 @@ export default function RuleExtractor() {
             </div>
             <div>
               <label className="block text-sm font-semibold text-gray-700 mb-1">
-                User
+                {ruleType === "wizard" ? "Total Steps" : "Max Rules"}
               </label>
               <input
-                className="border rounded w-full px-2 py-1 text-sm text-gray-700 focus:ring-2 focus:ring-indigo-500"
-                value={user}
-                onChange={(e) => setUser(e.target.value)}
+                type="number"
+                min={1}
+                max={20}
+                value={ruleType === "wizard" ? wizardTotalSteps : maxRules}
+                disabled={ruleType === "template"}
+                onChange={(e) => {
+                  if (ruleType === "template") return;
+                  const raw = Number(e.target.value);
+                  if (Number.isNaN(raw)) return;
+                  if (ruleType === "wizard") {
+                    setWizardTotalSteps(Math.max(1, Math.min(20, raw)));
+                    return;
+                  }
+                  setMaxRules(Math.max(1, Math.min(10, raw)));
+                }}
+                className="border rounded w-full px-2 py-1 text-sm text-gray-700 focus:ring-2 focus:ring-indigo-500 disabled:bg-gray-100 disabled:text-gray-500 disabled:cursor-not-allowed"
               />
             </div>
           </div>
 
+          {ruleType === "wizard" && (
+            <>
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">
+                  Wizard Name
+                </label>
+                <input
+                  className="border rounded w-full px-2 py-1 text-sm text-gray-700 focus:ring-2 focus:ring-indigo-500"
+                  value={wizardName}
+                  onChange={(e) => setWizardName(e.target.value)}
+                  placeholder="e.g. ABAP Factory Pattern Wizard"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">
+                  Wizard Description
+                </label>
+                <textarea
+                  className="border rounded w-full px-2 py-1 text-sm text-gray-700 focus:ring-2 focus:ring-indigo-500"
+                  value={wizardDescription}
+                  onChange={(e) => setWizardDescription(e.target.value)}
+                  placeholder="Short description of this wizard"
+                />
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-1">
+                    Step Title (Step {wizardNextStepNo})
+                  </label>
+                  <input
+                    className="border rounded w-full px-2 py-1 text-sm text-gray-700 focus:ring-2 focus:ring-indigo-500"
+                    value={wizardStepTitle}
+                    onChange={(e) => setWizardStepTitle(e.target.value)}
+                    placeholder="Short step title"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-1">
+                    Step Description
+                  </label>
+                  <input
+                    className="border rounded w-full px-2 py-1 text-sm text-gray-700 focus:ring-2 focus:ring-indigo-500"
+                    value={wizardStepDescription}
+                    onChange={(e) => setWizardStepDescription(e.target.value)}
+                    placeholder="Short step description"
+                  />
+                </div>
+              </div>
+            </>
+          )}
           {/* Code / guideline editor */}
-          <label className="block text-sm text-gray-600 mb-1">
-            Paste code or guideline text
-          </label>
+          <div className="flex items-center justify-between">
+            <label className="block text-sm text-gray-600 mb-1">
+              Paste code or guideline text
+            </label>
+            <button
+              type="button"
+              onClick={() => setText("")}
+              className="text-xs px-3 py-1.5 rounded border border-gray-300 hover:bg-gray-50"
+            >
+              Clear Input
+            </button>
+          </div>
           <div className="border rounded overflow-hidden">
             <Editor
               height="500px"
@@ -628,12 +840,21 @@ export default function RuleExtractor() {
             className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-60"
           >
             <Wand2 size={16} />
-            {loading ? "Extracting…" : "Extract Rule"}
+            {loading
+              ? "Extracting…"
+              : ruleType === "wizard"
+              ? "Extract Step"
+              : "Extract Rule"}
           </button>
         </aside>
 
         {/* RIGHT PANEL */}
         <main className="flex-1 p-6">
+          {extractError && (
+            <div className="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+              {extractError}
+            </div>
+          )}
           <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
             <div className="flex items-center gap-2 text-gray-700">
               <FileText size={18} />
@@ -651,8 +872,25 @@ export default function RuleExtractor() {
                   Loading project rules…
                 </span>
               )}
+              {ruleType === "wizard" && (
+                <span className="ml-2 text-xs text-gray-500">
+                  Next step: {wizardNextStepNo} / {wizardTotalSteps}
+                </span>
+              )}
             </div>
             <div className="flex items-center gap-2">
+              {ruleType === "wizard" &&
+                results.some(
+                  (r) => r.category === "wizard" && r.status !== "discarded"
+                ) && (
+                  <button
+                    onClick={saveWizard}
+                    className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700"
+                  >
+                    <Save size={14} />
+                    Save Wizard
+                  </button>
+                )}
               <div className="flex items-center gap-2 border rounded px-2 py-1 bg-white">
                 <Filter size={16} />
                 <select
@@ -668,9 +906,8 @@ export default function RuleExtractor() {
                   <option value="">All Categories</option>
                   <option value="code">Code</option>
                   <option value="design">Design</option>
-                  <option value="naming">Naming</option>
-                  <option value="performance">Performance</option>
                   <option value="template">Template</option>
+                  <option value="wizard">Wizard</option>
                 </select>
               </div>
               <input
@@ -685,28 +922,74 @@ export default function RuleExtractor() {
 
           {/* Rules grid */}
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-            {filtered.map((rule, idx) => {
-              const isExpanded = expanded.has(idx);
+            {filtered.map(({ r: rule, index: resultIdx }) => {
+              const isExpanded = expanded.has(resultIdx);
               const confidencePct = Math.round(
                 (rule.confidence ?? 0) * 100
               );
+              let selectorWarning = "";
+              let goodExampleCode = "";
+              try {
+                const parsed: any = yaml.load(rule.yaml);
+                const selector = parsed?.selector;
+                const pattern =
+                  typeof selector === "string"
+                    ? selector.trim()
+                    : String(selector?.pattern || "").trim();
+                const generic = new Set([
+                  "",
+                  "template_snippet",
+                  "wizard_step",
+                  "wizard",
+                  "template",
+                  "abap rule",
+                  "abap template",
+                ]);
+                if (generic.has(pattern.toLowerCase())) {
+                  selectorWarning = "Selector is missing or too generic.";
+                }
+                const example = parsed?.example;
+                goodExampleCode =
+                  typeof example === "object" && example
+                    ? String(
+                        example.good ||
+                          example.good_code ||
+                          example.example_good_code ||
+                          ""
+                      ).trim()
+                    : "";
+              } catch {
+                selectorWarning = "Selector could not be parsed.";
+              }
 
               return (
                 <div
-                  key={idx}
+                  key={`${rule._id || "rule"}-${resultIdx}`}
                   className="border rounded-xl bg-white shadow-sm flex flex-col overflow-hidden"
                 >
                   <div className="flex items-center justify-between px-4 py-3 border-b bg-gray-50">
                     <div className="flex flex-col gap-1">
                       <div className="flex items-center gap-2">
                         <span className="font-semibold text-sm text-gray-900">
-                          {rule._id || `Rule ${idx + 1}`}
+                          {rule._id || `Rule ${resultIdx + 1}`}
                         </span>
                         {rule.category && (
                           <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700">
                             {rule.category}
                           </span>
                         )}
+                        {rule.category === "code" &&
+                          Array.isArray(rule.subtags) &&
+                          rule.subtags
+                            .filter((tag) => tag !== "code")
+                            .map((tag) => (
+                              <span
+                                key={`${rule._id || resultIdx}-${tag}`}
+                                className="text-xs px-2 py-0.5 rounded-full bg-sky-100 text-sky-700"
+                              >
+                                {tag}
+                              </span>
+                            ))}
                       </div>
                       <div className="flex items-center gap-3 text-xs text-gray-500">
                         <div className="flex items-center gap-1">
@@ -714,11 +997,10 @@ export default function RuleExtractor() {
                           <select
                             value={rule._severity || "MAJOR"}
                             onChange={(e) =>
-                              updateRuleSeverity(idx, e.target.value)
+                              updateRuleSeverity(resultIdx, e.target.value)
                             }
                             className="border rounded px-2 py-0.5 bg-white text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500"
                           >
-                            <option value="CRITICAL">CRITICAL</option>
                             <option value="MAJOR">MAJOR</option>
                             <option value="MINOR">MINOR</option>
                             <option value="INFO">INFO</option>
@@ -744,6 +1026,8 @@ export default function RuleExtractor() {
                         className={`text-xs px-2 py-0.5 rounded-full ${
                           rule.status === "approved"
                             ? "bg-green-100 text-green-700"
+                            : rule.status === "saved"
+                            ? "bg-emerald-100 text-emerald-700"
                             : rule.status === "edited"
                             ? "bg-yellow-100 text-yellow-700"
                             : rule.status === "discarded"
@@ -757,8 +1041,8 @@ export default function RuleExtractor() {
                         onClick={() => {
                           setExpanded((prev) => {
                             const next = new Set(prev);
-                            if (next.has(idx)) next.delete(idx);
-                            else next.add(idx);
+                            if (next.has(resultIdx)) next.delete(resultIdx);
+                            else next.add(resultIdx);
                             return next;
                           });
                         }}
@@ -779,6 +1063,11 @@ export default function RuleExtractor() {
                         {rule.yaml}
                       </pre>
                     </div>
+                    {selectorWarning && (
+                      <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                        {selectorWarning}
+                      </div>
+                    )}
 
                     {rule.source_snippet && (
                       <div className="text-xs text-gray-600 space-y-1">
@@ -791,23 +1080,86 @@ export default function RuleExtractor() {
                       </div>
                     )}
 
+                    {rule.category !== "template" &&
+                      rule.category !== "wizard" &&
+                      goodExampleCode && (
+                        <div className="text-xs text-gray-700 space-y-1">
+                          <div className="font-semibold text-gray-700">
+                            Good Code Example
+                          </div>
+                          <pre className="bg-green-50 border border-green-200 rounded p-2 max-h-40 overflow-auto text-[11px]">
+                            {goodExampleCode}
+                          </pre>
+                        </div>
+                      )}
+
+                    {rule.category !== "template" && rule.category !== "wizard" && (
+                      <div className="space-y-2">
+                        <div className="text-xs font-semibold text-gray-700">Test Against Code</div>
+                        <textarea
+                          className="w-full border rounded p-2 text-xs font-mono h-24"
+                          placeholder="Paste code to validate against this rule"
+                          value={testCodeByIndex[resultIdx] || ""}
+                          onChange={(e) =>
+                            setTestCodeByIndex((prev) => ({
+                              ...prev,
+                              [resultIdx]: e.target.value,
+                            }))
+                          }
+                        />
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => testRule(resultIdx)}
+                            disabled={testingIndex === resultIdx}
+                            className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded bg-sky-600 text-white hover:bg-sky-700 disabled:opacity-60"
+                          >
+                            {testingIndex === resultIdx ? "Testing..." : "Test Rule"}
+                          </button>
+                          {testResultByIndex[resultIdx] && (
+                            <span
+                              className={`text-xs px-2 py-1 rounded ${
+                                testResultByIndex[resultIdx].passed
+                                  ? "bg-green-100 text-green-700"
+                                  : "bg-red-100 text-red-700"
+                              }`}
+                            >
+                              {testResultByIndex[resultIdx].passed ? "Pass" : "Fail"}
+                            </span>
+                          )}
+                        </div>
+                        {testResultByIndex[resultIdx] && (
+                          <div
+                            className={`text-xs rounded px-2 py-1 ${
+                              testResultByIndex[resultIdx].passed
+                                ? "bg-green-50 text-green-700 border border-green-200"
+                                : "bg-red-50 text-red-700 border border-red-200"
+                            }`}
+                          >
+                            {testResultByIndex[resultIdx].message}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     <div className="flex items-center justify-end gap-2 pt-2 border-t border-gray-100">
+                      {rule.category !== "wizard" && (
+                        <button
+                          onClick={() => saveSingleRule(resultIdx)}
+                          className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded bg-indigo-600 text-white hover:bg-indigo-700"
+                        >
+                          <Save size={14} />
+                          Save Rule
+                        </button>
+                      )}
                       <button
-                        onClick={() => openEditor(idx)}
+                        onClick={() => openEditor(resultIdx)}
                         className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded border border-gray-300 hover:bg-gray-50"
                       >
                         <Edit3 size={14} />
                         Edit YAML
                       </button>
                       <button
-                        onClick={() => approveRule(idx)}
-                        className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded bg-green-600 text-white hover:bg-green-700"
-                      >
-                        <Check size={14} />
-                        Approve
-                      </button>
-                      <button
-                        onClick={() => discardRule(idx)}
+                        onClick={() => discardRule(resultIdx)}
                         className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded bg-red-50 text-red-600 hover:bg-red-100"
                       >
                         <X size={14} />
@@ -821,26 +1173,6 @@ export default function RuleExtractor() {
           </div>
         </main>
       </div>
-
-      {/* Footer */}
-      <footer className="w-full border-t bg-white p-4 flex justify-end sticky bottom-0 shadow-md">
-        <div className="flex items-center gap-3">
-          <input
-            className="border rounded px-3 py-1 text-sm"
-            placeholder="Target pack name (e.g. abap-core-standards)"
-            value={pack}
-            onChange={(e) => setPack(e.target.value)}
-          />
-          <button
-            onClick={saveApprovedToPack}
-            disabled={!rulePack || results.length === 0}
-            className="inline-flex items-center gap-2 px-6 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-60"
-          >
-            <Save size={16} />
-            Save Rules
-          </button>
-        </div>
-      </footer>
 
       {/* YAML Editor Modal */}
       <Modal
@@ -890,7 +1222,46 @@ export default function RuleExtractor() {
         </div>
       </Modal>
 
+      <Modal
+        open={saveSuccessOpen}
+        onClose={() => setSaveSuccessOpen(false)}
+        title="Success"
+        footer={
+          <div className="flex justify-end">
+            <button
+              onClick={() => setSaveSuccessOpen(false)}
+              className="px-3 py-1.5 rounded bg-indigo-600 text-white"
+            >
+              OK
+            </button>
+          </div>
+        }
+      >
+        <div className="text-sm text-gray-700">{saveSuccessMessage}</div>
+      </Modal>
+
+      <Modal
+        open={noticeOpen}
+        onClose={() => setNoticeOpen(false)}
+        title="Message"
+        footer={
+          <div className="flex justify-end">
+            <button
+              onClick={() => setNoticeOpen(false)}
+              className="px-3 py-1.5 rounded bg-indigo-600 text-white"
+            >
+              OK
+            </button>
+          </div>
+        }
+      >
+        <div className="text-sm text-gray-700">{noticeMessage}</div>
+      </Modal>
+
       {loading && <LoadingOverlay />}
     </div>
   );
 }
+
+
+

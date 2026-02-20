@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   BarChart,
   Bar,
@@ -8,106 +9,142 @@ import {
   ResponsiveContainer,
 } from "recharts";
 
+type DashboardKpi = {
+  title: string;
+  value: number | string;
+  color: string;
+};
+
+type DashboardTrend = {
+  date: string;
+  violations: number;
+};
+
+type DashboardViolation = {
+  rulePack: string;
+  object: string;
+  transport: string;
+  developer: string;
+  severity: string;
+  status?: string;
+};
+
+type DashboardData = {
+  kpis: DashboardKpi[];
+  trendData: DashboardTrend[];
+  violations: DashboardViolation[];
+};
+
+const CHART_COLORS = {
+  barPrimary: "#0f4da1",
+  grid: "#cfe0f2",
+  tooltipBg: "#f8fbff",
+  tooltipBorder: "#b8d0ea",
+};
+
+const initialData: DashboardData = {
+  kpis: [],
+  trendData: [],
+  violations: [],
+};
+
 export default function Dashboard() {
-  // Mock KPI data (including Projects)
-  const kpis = [
-    { title: "Total Rules", value: 120, color: "text-indigo-700" },
-    { title: "Violations Today", value: 18, color: "text-red-600" },
-    { title: "Compliance Score", value: "93%", color: "text-green-600" },
-    { title: "Projects", value: 7, color: "text-sky-700" }, // ← NEW KPI
-  ];
+  const [data, setData] = useState<DashboardData>(initialData);
+  const [error, setError] = useState<string | null>(null);
+  const mountedRef = useRef(true);
 
-  // Mock violation trend data (for chart)
-  const trendData = [
-    { date: "Mon", violations: 12 },
-    { date: "Tue", violations: 10 },
-    { date: "Wed", violations: 16 },
-    { date: "Thu", violations: 9 },
-    { date: "Fri", violations: 18 },
-  ];
+  const loadDashboard = useCallback(async () => {
+    try {
+      setError(null);
+      const res = await fetch("/api/dashboard/overview");
+      if (!res.ok) throw new Error(`Dashboard API failed (${res.status})`);
+      const json = (await res.json()) as DashboardData;
+      if (!mountedRef.current) return;
+      setData(json);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to load dashboard";
+      if (mountedRef.current) setError(message);
+    }
+  }, []);
 
-  // Mock table data
-  const violations = [
-    {
-      rulePack: "abap-core-safety",
-      object: "ZRP_MFP_CLOCK_UPDATE_DB",
-      transport: "ZEDK1234456",
-      developer: "Prashanth Selvam",
-      severity: "Error",
-    },
-    {
-      rulePack: "abap-naming-conv",
-      object: "ZCL_MFP_LEAVE_REQUEST",
-      transport: "ZEDK1235656",
-      developer: "Keerthivasan Vasudevan",
-      severity: "Warning",
-    },
-    {
-      rulePack: "security-base",
-      object: "ZMFP_NETWORKS_WBS",
-      transport: "ZEDK1237786",
-      developer: "Duraimurugan kathirvel",
-      severity: "Error",
-    },
-  ];
+  useEffect(() => {
+    mountedRef.current = true;
+    void loadDashboard();
+    const onManualRefresh = () => {
+      void loadDashboard();
+    };
+    window.addEventListener("hb-dashboard-refresh", onManualRefresh);
+    const intervalId = window.setInterval(() => {
+      void loadDashboard();
+    }, 30000);
+    return () => {
+      mountedRef.current = false;
+      window.clearInterval(intervalId);
+      window.removeEventListener("hb-dashboard-refresh", onManualRefresh);
+    };
+  }, [loadDashboard]);
 
   return (
-    <div className="p-8">
-      {/* KPI cards */}
+    <div className="min-h-full bg-gray-100 p-8">
+      {error && (
+        <div className="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          {error}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-10">
-        {kpis.map((kpi) => (
+        {data.kpis.map((kpi) => (
           <div
             key={kpi.title}
-            className="bg-white p-6 rounded-lg shadow-sm border border-gray-100"
+            className="bg-gradient-to-b from-white to-gray-50 p-6 rounded-lg shadow-sm border border-gray-200"
           >
-            <h2 className="text-sm font-medium text-gray-500">
+            <h2 className="text-sm font-medium text-gray-600">
               {kpi.title}
             </h2>
-            <p className={`text-3xl font-bold mt-2 ${kpi.color}`}>
+            <p className={`text-3xl font-bold mt-2 text-gray-800 ${kpi.color}`}>
               {kpi.value}
             </p>
           </div>
         ))}
       </div>
 
-      {/* Violations Trend */}
-      <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-100 mb-10">
-        <h2 className="text-lg font-semibold text-gray-700 mb-4">
+      <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200 mb-10">
+        <h2 className="text-lg font-semibold text-gray-800 mb-4">
           Violations Trend (This Week)
         </h2>
         <ResponsiveContainer width="100%" height={250}>
-          <BarChart data={trendData}>
-            <CartesianGrid strokeDasharray="3 3" />
-            <XAxis dataKey="date" />
-            <YAxis />
-            <Tooltip />
-            <Bar dataKey="violations" fill="#6366F1" radius={[4, 4, 0, 0]} />
+          <BarChart data={data.trendData} barCategoryGap="28%">
+            <CartesianGrid stroke={CHART_COLORS.grid} strokeDasharray="3 3" vertical={false} />
+            <XAxis dataKey="date" stroke="#4a6484" />
+            <YAxis stroke="#4a6484" />
+            <Tooltip contentStyle={{ backgroundColor: CHART_COLORS.tooltipBg, borderColor: CHART_COLORS.tooltipBorder }} />
+            <Bar dataKey="violations" fill={CHART_COLORS.barPrimary} radius={[3, 3, 0, 0]} barSize={14} />
           </BarChart>
         </ResponsiveContainer>
       </div>
 
-      {/* Violations Table */}
-      <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-100">
-        <h2 className="text-lg font-semibold text-gray-700 mb-4">
+      <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+        <h2 className="text-lg font-semibold text-gray-800 mb-4">
           Violations Summary
         </h2>
 
         <div className="overflow-x-auto">
           <table className="w-full text-sm text-left border-collapse">
             <thead>
-              <tr className="border-b text-gray-600 bg-gray-50">
+              <tr className="border-b border-gray-200 text-gray-700 bg-gray-50">
                 <th className="py-2 px-3">Rule Pack</th>
                 <th className="py-2 px-3">Violation Object</th>
                 <th className="py-2 px-3">Transport</th>
                 <th className="py-2 px-3">Developer Name</th>
                 <th className="py-2 px-3">Severity</th>
+                <th className="py-2 px-3">Status</th>
               </tr>
             </thead>
             <tbody>
-              {violations.map((v, index) => (
+              {data.violations.map((v, index) => (
                 <tr
-                  key={index}
-                  className="border-b hover:bg-gray-50 transition"
+                  key={`${v.transport}-${index}`}
+                  className="border-b border-gray-100 hover:bg-gray-50 transition"
                 >
                   <td className="py-2 px-3 font-medium text-gray-800">
                     {v.rulePack}
@@ -118,14 +155,22 @@ export default function Dashboard() {
                   <td
                     className={`py-2 px-3 font-semibold ${
                       v.severity === "Error"
-                        ? "text-red-600"
-                        : "text-yellow-600"
+                        ? "text-gray-700"
+                        : "text-gray-500"
                     }`}
                   >
                     {v.severity}
                   </td>
+                  <td className="py-2 px-3 text-gray-700">{v.status || "Not Fixed"}</td>
                 </tr>
               ))}
+              {data.violations.length === 0 && (
+                <tr>
+                  <td className="py-3 px-3 text-gray-500" colSpan={6}>
+                    No violations available yet.
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
