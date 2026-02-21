@@ -24,6 +24,7 @@ DEFAULT_APP_SETTINGS: dict[str, Any] = {
         "email": "name@zalaris.com",
         "role": "developer",
         "team_owner_map": {},
+        "show_rules_created_by_others": True,
     },
     "rule_engine_defaults": {
         "default_severity": "WARNING",
@@ -77,6 +78,15 @@ DEFAULT_APP_SETTINGS: dict[str, Any] = {
     },
 }
 
+LLM_USD_TO_EUR = float(os.getenv("HB_USD_TO_EUR") or "0.92")
+LLM_PRICING_USD_PER_1M: dict[str, tuple[float, float]] = {
+    # (input_usd_per_1m_tokens, output_usd_per_1m_tokens)
+    "gpt-4.1-mini": (0.40, 1.60),
+    "gpt-4o-mini": (0.15, 0.60),
+    "text-embedding-3-small": (0.02, 0.0),
+    "text-embedding-3-large": (0.13, 0.0),
+}
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -100,6 +110,29 @@ def _resolve_date_bounds(start_date: str | None, end_date: str | None) -> tuple[
     if start and end and start > end:
         return end, start
     return start, end
+
+
+def _normalize_transport_value(value: str | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "-"
+    low = text.lower()
+    if low in {"adt", "adt_object", "unknown", "n/a", "na", "-"}:
+        return "-"
+    return text
+
+
+def _normalize_created_at_value(value: str | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return _now_iso()
+    try:
+        return datetime.fromisoformat(text).isoformat()
+    except Exception:
+        normalized_day = _normalize_iso_date(text)
+        if normalized_day:
+            return f"{normalized_day}T00:00:00+00:00"
+        return _now_iso()
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -192,11 +225,28 @@ def _init_db() -> None:
                 config_value TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS llm_usage_events (
+                id TEXT PRIMARY KEY,
+                developer TEXT NOT NULL,
+                feature TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                cost_eur REAL NOT NULL DEFAULT 0,
+                currency TEXT NOT NULL DEFAULT 'EUR',
+                metadata_json TEXT,
+                created_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_rules_project ON rules(project_id);
             CREATE INDEX IF NOT EXISTS idx_rules_created_at ON rules(created_at);
             CREATE INDEX IF NOT EXISTS idx_rules_rule_id ON rules(rule_id);
             CREATE INDEX IF NOT EXISTS idx_dashboard_violations_created ON dashboard_violations(created_at);
             CREATE INDEX IF NOT EXISTS idx_wizard_steps_wizard ON wizard_steps(wizard_id);
+            CREATE INDEX IF NOT EXISTS idx_llm_usage_created_at ON llm_usage_events(created_at);
+            CREATE INDEX IF NOT EXISTS idx_llm_usage_developer ON llm_usage_events(developer);
             """
         )
 
@@ -228,6 +278,21 @@ def _init_db() -> None:
                 WHEN LOWER(COALESCE(status, '')) = 'fixed' THEN 'Fixed'
                 ELSE 'Not Fixed'
             END
+            """
+        )
+        conn.execute(
+            """
+            UPDATE dashboard_violations
+            SET created_at = ?
+            WHERE TRIM(COALESCE(created_at, '')) = ''
+            """,
+            (_now_iso(),),
+        )
+        conn.execute(
+            """
+            UPDATE dashboard_violations
+            SET transport = '-'
+            WHERE LOWER(TRIM(COALESCE(transport, ''))) IN ('', 'adt', 'adt_object', 'unknown', 'n/a', 'na')
             """
         )
 
@@ -337,6 +402,40 @@ def list_projects() -> list[dict[str, Any]]:
     ]
 
 
+def get_managed_developers_for_architect(user_email: str) -> list[str]:
+    architect = str(user_email or "").strip().lower()
+    if not architect:
+        return []
+    developers: set[str] = set()
+    with _get_conn() as conn:
+        rows = conn.execute("SELECT members_json FROM projects").fetchall()
+    for row in rows:
+        try:
+            members = json.loads(str(row["members_json"] or "[]"))
+        except Exception:
+            members = []
+        if not isinstance(members, list):
+            continue
+        is_architect_member = any(
+            str(member.get("email") or "").strip().lower() == architect
+            and str(member.get("role") or "").strip().lower() == "architect"
+            for member in members
+            if isinstance(member, dict)
+        )
+        if not is_architect_member:
+            continue
+        for member in members:
+            if not isinstance(member, dict):
+                continue
+            role = str(member.get("role") or "").strip().lower()
+            email = str(member.get("email") or "").strip().lower()
+            if not email or email == architect:
+                continue
+            if role in {"developer", "senior_developer"}:
+                developers.add(email)
+    return sorted(developers)
+
+
 def create_project(name: str, description: str | None, members: list[dict[str, str]]) -> dict[str, Any]:
     project_id = f"{_slugify(name)}-{uuid.uuid4().hex[:6]}"
     member_list = [
@@ -426,48 +525,69 @@ def add_rule_for_project(
     if normalized_status not in persisted_statuses:
         return
 
+    inserted = False
     with _get_conn() as conn:
-        project = conn.execute("SELECT id FROM projects WHERE id = ?", (project_id,)).fetchone()
-        if not project:
-            return
-
-        derived = _derive_rule_fields(rule)
-        rule_pack = str(rule.get("rule_pack") or "generic").strip()
-        conn.execute(
-            """
-            INSERT INTO rules (
-                project_id, rule_id, yaml_text, category, severity, confidence,
-                status, source_type, created_by, duplicate_of, similarity,
-                source_snippet, raw_json, created_at, rule_pack
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                project_id,
-                derived["rule_id"],
-                derived["yaml_text"],
-                derived["category"],
-                derived["severity"],
-                derived["confidence"],
-                normalized_status,
-                source_type,
-                created_by,
-                rule.get("duplicate_of"),
-                rule.get("similarity"),
-                derived["source_snippet"],
-                json.dumps(rule),
-                _now_iso(),
-                rule_pack,
-            ),
+        inserted = _insert_rule_for_project(
+            conn,
+            project_id=project_id,
+            rule=rule,
+            normalized_status=normalized_status,
+            source_type=source_type,
+            created_by=created_by,
         )
 
-    if normalized_status == "edited":
+    if inserted and normalized_status == "edited":
+        derived = _derive_rule_fields(rule)
         _record_dashboard_violation(
             rule_pack=str(rule.get("rule_pack") or "generic"),
             object_name=str(derived["rule_id"]),
             developer=created_by,
             severity=str(derived["severity"]),
         )
+
+
+def _insert_rule_for_project(
+    conn: sqlite3.Connection,
+    project_id: str,
+    rule: dict[str, Any],
+    normalized_status: str,
+    source_type: str,
+    created_by: str,
+) -> bool:
+    project = conn.execute("SELECT id FROM projects WHERE id = ?", (project_id,)).fetchone()
+    if not project:
+        return False
+
+    derived = _derive_rule_fields(rule)
+    rule_pack = str(rule.get("rule_pack") or "generic").strip()
+    conn.execute(
+        """
+        INSERT INTO rules (
+            project_id, rule_id, yaml_text, category, severity, confidence,
+            status, source_type, created_by, duplicate_of, similarity,
+            source_snippet, raw_json, created_at, rule_pack
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            project_id,
+            derived["rule_id"],
+            derived["yaml_text"],
+            derived["category"],
+            derived["severity"],
+            derived["confidence"],
+            normalized_status,
+            source_type,
+            created_by,
+            rule.get("duplicate_of"),
+            rule.get("similarity"),
+            derived["source_snippet"],
+            json.dumps(rule),
+            _now_iso(),
+            rule_pack,
+        ),
+    )
+    return True
 
 
 def _ensure_wizard_fields(
@@ -832,11 +952,14 @@ def get_rules_for_pack(
     pack_name: str,
     project_id: str | None = None,
     created_by: str | None = None,
+    q: str | None = None,
 ) -> list[dict[str, Any]]:
+    query = str(q or "").strip()
     with _get_conn() as conn:
         sql = """
             SELECT row_id, rule_id, yaml_text, confidence, category, severity, duplicate_of, similarity,
                    source_snippet, status, rule_pack, project_id
+                   , created_by
             FROM rules
             WHERE COALESCE(rule_pack, 'generic') = ?
               AND LOWER(status) IN ('saved', 'approved', 'edited')
@@ -848,6 +971,17 @@ def get_rules_for_pack(
         if created_by:
             sql += " AND created_by = ?"
             params.append(created_by)
+        if query:
+            sql += """
+              AND (
+                    LOWER(COALESCE(rule_id, '')) LIKE ?
+                 OR LOWER(COALESCE(yaml_text, '')) LIKE ?
+                 OR LOWER(COALESCE(category, '')) LIKE ?
+                 OR LOWER(COALESCE(severity, '')) LIKE ?
+              )
+            """
+            q_like = f"%{query.lower()}%"
+            params.extend([q_like, q_like, q_like, q_like])
         sql += " ORDER BY row_id DESC"
         rows = conn.execute(sql, tuple(params)).fetchall()
 
@@ -864,6 +998,7 @@ def get_rules_for_pack(
             "source_snippet": row["source_snippet"],
             "rule_pack": row["rule_pack"] or "generic",
             "project_id": row["project_id"],
+            "created_by": row["created_by"],
             "status": "approved" if str(row["status"]).lower() in {"approved", "saved"} else row["status"],
         }
         for row in rows
@@ -925,6 +1060,23 @@ def get_rules_for_pack(
                             "status": "approved",
                         }
                     )
+
+    if query:
+        q_low = query.lower()
+        filtered: list[dict[str, Any]] = []
+        for rule in rules:
+            haystack = "\n".join(
+                [
+                    str(rule.get("_id") or ""),
+                    str(rule.get("category") or ""),
+                    str(rule.get("_severity") or ""),
+                    str(rule.get("rule_pack") or ""),
+                    str(rule.get("yaml") or ""),
+                ]
+            ).lower()
+            if q_low in haystack:
+                filtered.append(rule)
+        return filtered
 
     return rules
 
@@ -1462,6 +1614,140 @@ def get_ai_llm_fallback_enabled(default: bool = False) -> bool:
     return default
 
 
+def get_show_shared_rules_enabled(default: bool = True) -> bool:
+    settings = get_app_settings_unmasked()
+    workspace = settings.get("workspace_identity")
+    if isinstance(workspace, dict):
+        value = workspace.get("show_rules_created_by_others")
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        if isinstance(value, (int, float)):
+            return bool(value)
+    return default
+
+
+def _get_model_pricing_usd(model: str) -> tuple[float, float]:
+    key = str(model or "").strip().lower()
+    if key in LLM_PRICING_USD_PER_1M:
+        return LLM_PRICING_USD_PER_1M[key]
+    if "embedding" in key:
+        return (0.02, 0.0)
+    if "mini" in key:
+        return (0.40, 1.60)
+    return (1.0, 4.0)
+
+
+def estimate_llm_cost_eur(model: str, input_tokens: int, output_tokens: int = 0) -> float:
+    in_rate, out_rate = _get_model_pricing_usd(model)
+    in_cost_usd = (max(0, int(input_tokens or 0)) / 1_000_000.0) * in_rate
+    out_cost_usd = (max(0, int(output_tokens or 0)) / 1_000_000.0) * out_rate
+    return round((in_cost_usd + out_cost_usd) * LLM_USD_TO_EUR, 8)
+
+
+def log_llm_usage_event(
+    developer: str,
+    feature: str,
+    provider: str,
+    model: str,
+    input_tokens: int,
+    output_tokens: int = 0,
+    total_tokens: int | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    total = int(total_tokens) if total_tokens is not None else max(0, int(input_tokens or 0)) + max(0, int(output_tokens or 0))
+    row = {
+        "id": f"llm-{uuid.uuid4().hex[:12]}",
+        "developer": (developer or "unknown").strip() or "unknown",
+        "feature": (feature or "unknown").strip() or "unknown",
+        "provider": (provider or "openai").strip() or "openai",
+        "model": (model or "").strip() or "unknown-model",
+        "input_tokens": max(0, int(input_tokens or 0)),
+        "output_tokens": max(0, int(output_tokens or 0)),
+        "total_tokens": max(0, total),
+        "cost_eur": estimate_llm_cost_eur(model=model, input_tokens=input_tokens, output_tokens=output_tokens),
+        "currency": "EUR",
+        "metadata_json": json.dumps(metadata or {}, ensure_ascii=True),
+        "created_at": _now_iso(),
+    }
+    with _get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO llm_usage_events (
+                id, developer, feature, provider, model, input_tokens, output_tokens, total_tokens,
+                cost_eur, currency, metadata_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["id"],
+                row["developer"],
+                row["feature"],
+                row["provider"],
+                row["model"],
+                row["input_tokens"],
+                row["output_tokens"],
+                row["total_tokens"],
+                row["cost_eur"],
+                row["currency"],
+                row["metadata_json"],
+                row["created_at"],
+            ),
+        )
+    return row
+
+
+def get_llm_usage_daily_cost(days: int = 30) -> dict[str, Any]:
+    safe_days = max(1, min(int(days or 30), 365))
+    with _get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                substr(created_at, 1, 10) AS day,
+                COUNT(*) AS calls,
+                SUM(cost_eur) AS cost_eur,
+                SUM(input_tokens) AS input_tokens,
+                SUM(output_tokens) AS output_tokens,
+                SUM(total_tokens) AS total_tokens
+            FROM llm_usage_events
+            WHERE date(created_at) >= date('now', ?)
+            GROUP BY day
+            ORDER BY day
+            """,
+            (f"-{safe_days - 1} day",),
+        ).fetchall()
+
+    by_day = {str(row["day"]): row for row in rows}
+    today = datetime.now(timezone.utc).date()
+    series: list[dict[str, Any]] = []
+    total_cost = 0.0
+    total_calls = 0
+    for i in range(safe_days - 1, -1, -1):
+        day = today - timedelta(days=i)
+        key = day.isoformat()
+        row = by_day.get(key)
+        point = {
+            "date": key,
+            "cost_eur": round(float(row["cost_eur"] or 0.0), 6) if row else 0.0,
+            "calls": int(row["calls"] or 0) if row else 0,
+            "input_tokens": int(row["input_tokens"] or 0) if row else 0,
+            "output_tokens": int(row["output_tokens"] or 0) if row else 0,
+            "total_tokens": int(row["total_tokens"] or 0) if row else 0,
+        }
+        total_cost += point["cost_eur"]
+        total_calls += point["calls"]
+        series.append(point)
+
+    return {
+        "days": safe_days,
+        "currency": "EUR",
+        "total_cost_eur": round(total_cost, 6),
+        "total_calls": total_calls,
+        "series": series,
+    }
+
+
 def get_app_settings() -> dict[str, Any]:
     return _sanitize_app_settings(_load_app_settings_unmasked())
 
@@ -1561,7 +1847,11 @@ def delete_rule_pack_option(option_id: str) -> bool:
         return cur.rowcount > 0
 
 
-def list_dashboard_violations(limit: int = 50, developer: str | None = None) -> list[dict[str, str]]:
+def list_dashboard_violations(
+    limit: int = 50,
+    developer: str | None = None,
+    developers: list[str] | None = None,
+) -> list[dict[str, str]]:
     with _get_conn() as conn:
         sql = """
             SELECT id, rule_pack, object_name, transport, developer, severity, status, created_at
@@ -1571,6 +1861,12 @@ def list_dashboard_violations(limit: int = 50, developer: str | None = None) -> 
         if developer:
             sql += " WHERE developer = ?"
             params.append(developer)
+        elif developers:
+            normalized = [str(d).strip().lower() for d in developers if str(d).strip()]
+            if normalized:
+                placeholders = ",".join("?" for _ in normalized)
+                sql += f" WHERE LOWER(developer) IN ({placeholders})"
+                params.extend(normalized)
         sql += " ORDER BY created_at DESC LIMIT ?"
         params.append(max(1, min(limit, 200)))
         rows = conn.execute(sql, tuple(params)).fetchall()
@@ -1579,11 +1875,11 @@ def list_dashboard_violations(limit: int = 50, developer: str | None = None) -> 
             "id": str(row["id"]),
             "rule_pack": str(row["rule_pack"]),
             "object_name": str(row["object_name"]),
-            "transport": str(row["transport"]),
+            "transport": _normalize_transport_value(str(row["transport"])),
             "developer": str(row["developer"]),
             "severity": str(row["severity"]),
             "status": str(row["status"] or "Not Fixed"),
-            "created_at": str(row["created_at"]),
+            "created_at": _normalize_created_at_value(str(row["created_at"])),
         }
         for row in rows
     ]
@@ -1598,15 +1894,16 @@ def create_dashboard_violation(
     status: str = "Not Fixed",
 ) -> dict[str, str]:
     normalized_status = "Fixed" if str(status or "").strip().lower() == "fixed" else "Not Fixed"
+    incoming_transport = _normalize_transport_value(transport)
     row = {
         "id": f"vio-{uuid.uuid4().hex[:12]}",
         "rule_pack": rule_pack.strip(),
         "object_name": object_name.strip(),
-        "transport": transport.strip(),
+        "transport": incoming_transport,
         "developer": developer.strip(),
         "severity": severity.upper().strip(),
         "status": normalized_status,
-        "created_at": _now_iso(),
+        "created_at": _normalize_created_at_value(_now_iso()),
     }
     with _get_conn() as conn:
         if normalized_status == "Fixed":
@@ -1632,7 +1929,7 @@ def create_dashboard_violation(
 
         existing = conn.execute(
             """
-            SELECT id
+            SELECT id, transport
             FROM dashboard_violations
             WHERE object_name = ? AND developer = ? AND LOWER(status) = 'not fixed'
             ORDER BY created_at DESC
@@ -1642,6 +1939,9 @@ def create_dashboard_violation(
         ).fetchone()
         if existing:
             row["id"] = str(existing["id"])
+            existing_transport = _normalize_transport_value(str(existing["transport"] or ""))
+            if row["transport"] == "-" and existing_transport != "-":
+                row["transport"] = existing_transport
             conn.execute(
                 """
                 UPDATE dashboard_violations
@@ -1702,8 +2002,24 @@ def clear_dashboard_violations_by_date_range(start_date: str, end_date: str) -> 
         return int(cur.rowcount or 0)
 
 
-def get_dashboard_overview(created_by: str | None = None) -> dict[str, Any]:
+def clear_all_fixed_dashboard_violations() -> int:
     with _get_conn() as conn:
+        cur = conn.execute(
+            """
+            DELETE FROM dashboard_violations
+            WHERE LOWER(COALESCE(status, '')) = 'fixed'
+            """
+        )
+        return int(cur.rowcount or 0)
+
+
+def get_dashboard_overview(
+    created_by: str | None = None,
+    developers: list[str] | None = None,
+) -> dict[str, Any]:
+    with _get_conn() as conn:
+        scoped_developers = [str(d).strip().lower() for d in (developers or []) if str(d).strip()]
+
         if created_by:
             total_rules = int(
                 conn.execute(
@@ -1727,7 +2043,42 @@ def get_dashboard_overview(created_by: str | None = None) -> dict[str, Any]:
         projects = int(conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0])
 
         today = datetime.now(timezone.utc).date().isoformat()
-        if created_by:
+        if scoped_developers:
+            placeholders = ",".join("?" for _ in scoped_developers)
+            violations_today = int(
+                conn.execute(
+                    f"""
+                    SELECT COUNT(*) FROM dashboard_violations
+                    WHERE created_at LIKE ?
+                      AND LOWER(developer) IN ({placeholders})
+                      AND LOWER(COALESCE(status, 'not fixed')) = 'not fixed'
+                    """,
+                    (f"{today}%", *scoped_developers),
+                ).fetchone()[0]
+            )
+            trend_rows = conn.execute(
+                f"""
+                SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS count
+                FROM dashboard_violations
+                WHERE date(created_at) >= date('now', '-6 day')
+                  AND LOWER(developer) IN ({placeholders})
+                  AND LOWER(COALESCE(status, 'not fixed')) = 'not fixed'
+                GROUP BY day
+                ORDER BY day
+                """,
+                tuple(scoped_developers),
+            ).fetchall()
+            violation_rows = conn.execute(
+                f"""
+                SELECT rule_pack, object_name, transport, developer, severity, status, created_at
+                FROM dashboard_violations
+                WHERE LOWER(developer) IN ({placeholders})
+                ORDER BY created_at DESC
+                LIMIT 15
+                """,
+                tuple(scoped_developers),
+            ).fetchall()
+        elif created_by:
             violations_today = int(
                 conn.execute(
                     """
@@ -1753,7 +2104,7 @@ def get_dashboard_overview(created_by: str | None = None) -> dict[str, Any]:
             ).fetchall()
             violation_rows = conn.execute(
                 """
-                SELECT rule_pack, object_name, transport, developer, severity, status
+                SELECT rule_pack, object_name, transport, developer, severity, status, created_at
                 FROM dashboard_violations
                 WHERE developer = ?
                 ORDER BY created_at DESC
@@ -1784,7 +2135,7 @@ def get_dashboard_overview(created_by: str | None = None) -> dict[str, Any]:
             ).fetchall()
             violation_rows = conn.execute(
                 """
-                SELECT rule_pack, object_name, transport, developer, severity, status
+                SELECT rule_pack, object_name, transport, developer, severity, status, created_at
                 FROM dashboard_violations
                 ORDER BY created_at DESC
                 LIMIT 15
@@ -1815,10 +2166,11 @@ def get_dashboard_overview(created_by: str | None = None) -> dict[str, Any]:
         {
             "rulePack": row["rule_pack"],
             "object": row["object_name"],
-            "transport": row["transport"],
+            "transport": _normalize_transport_value(str(row["transport"])),
             "developer": row["developer"],
             "severity": row["severity"].capitalize(),
             "status": str(row["status"] or "Not Fixed"),
+            "date": _normalize_created_at_value(str(row["created_at"] or ""))[:10],
         }
         for row in violation_rows
     ]
@@ -1832,10 +2184,28 @@ def get_dashboard_overview(created_by: str | None = None) -> dict[str, Any]:
 
 def compute_analytics_overview(
     created_by: str | None = None,
+    developers: list[str] | None = None,
+    developer: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> dict[str, Any]:
     start_bound, end_bound = _resolve_date_bounds(start_date, end_date)
+    scope_clauses: list[str] = []
+    scope_params: list[Any] = []
+    if created_by:
+        scope_clauses.append("created_by = ?")
+        scope_params.append(created_by)
+    if developers:
+        normalized = [str(d).strip().lower() for d in developers if str(d).strip()]
+        if normalized:
+            placeholders = ",".join("?" for _ in normalized)
+            scope_clauses.append(f"LOWER(created_by) IN ({placeholders})")
+            scope_params.extend(normalized)
+    if developer:
+        scope_clauses.append("LOWER(created_by) = ?")
+        scope_params.append(str(developer).strip().lower())
+    scope_sql = (" WHERE " + " AND ".join(scope_clauses)) if scope_clauses else ""
+
     with _get_conn() as conn:
         sql = """
             SELECT project_id, rule_id, category, severity, status, created_at
@@ -1846,6 +2216,15 @@ def compute_analytics_overview(
         if created_by:
             where_clauses.append("created_by = ?")
             params.append(created_by)
+        if developers:
+            normalized = [str(d).strip().lower() for d in developers if str(d).strip()]
+            if normalized:
+                placeholders = ",".join("?" for _ in normalized)
+                where_clauses.append(f"LOWER(created_by) IN ({placeholders})")
+                params.extend(normalized)
+        if developer:
+            where_clauses.append("LOWER(created_by) = ?")
+            params.append(str(developer).strip().lower())
         if start_bound:
             where_clauses.append("date(created_at) >= date(?)")
             params.append(start_bound)
@@ -1856,6 +2235,28 @@ def compute_analytics_overview(
             sql += " WHERE " + " AND ".join(where_clauses)
         rows = conn.execute(sql, tuple(params)).fetchall()
         projects = conn.execute("SELECT id, name FROM projects").fetchall()
+        rolling_counts = conn.execute(
+            f"""
+            SELECT
+                SUM(CASE WHEN date(created_at) = date('now') THEN 1 ELSE 0 END) AS day_count,
+                SUM(CASE WHEN date(created_at) >= date('now', '-6 day') THEN 1 ELSE 0 END) AS week_count,
+                SUM(CASE WHEN date(created_at) >= date('now', '-29 day') THEN 1 ELSE 0 END) AS month_count
+            FROM rules
+            {scope_sql}
+            """,
+            tuple(scope_params),
+        ).fetchone()
+        creator_rows = conn.execute(
+            f"""
+            SELECT created_by AS creator, COUNT(*) AS count
+            FROM rules
+            {scope_sql}
+            GROUP BY created_by
+            ORDER BY count DESC
+            LIMIT 10
+            """,
+            tuple(scope_params),
+        ).fetchall()
 
     entries = [dict(row) for row in rows]
     # Templates and wizards are guidance assets, not violation analytics entities.
@@ -1961,7 +2362,14 @@ def compute_analytics_overview(
             "total_rules": total_rules,
             "saved_rules": total_saved,
             "overall_compliance": overall_compliance,
+            "rules_created_today": int((rolling_counts["day_count"] or 0) if rolling_counts else 0),
+            "rules_created_last_7d": int((rolling_counts["week_count"] or 0) if rolling_counts else 0),
+            "rules_created_last_30d": int((rolling_counts["month_count"] or 0) if rolling_counts else 0),
         },
+        "top_rule_creators": [
+            {"creator": str(row["creator"] or "unknown"), "count": int(row["count"] or 0)}
+            for row in creator_rows
+        ],
         "compliance_trend": buckets,
         "violation_heatmap": violation_heatmap,
         "lifecycle_funnel": lifecycle_funnel,
@@ -1971,6 +2379,7 @@ def compute_analytics_overview(
 
 def compute_developer_analytics(
     created_by: str | None = None,
+    developers: list[str] | None = None,
     developer: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
@@ -1987,6 +2396,12 @@ def compute_developer_analytics(
         if created_by:
             where_clauses.append("developer = ?")
             params.append(created_by)
+        if developers:
+            normalized = [str(d).strip().lower() for d in developers if str(d).strip()]
+            if normalized:
+                placeholders = ",".join("?" for _ in normalized)
+                where_clauses.append(f"LOWER(developer) IN ({placeholders})")
+                params.extend(normalized)
         if developer:
             where_clauses.append("developer = ?")
             params.append(developer)
@@ -2126,6 +2541,7 @@ def compute_developer_analytics(
 
 def list_analytics_developers(
     created_by: str | None = None,
+    developers: list[str] | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> list[str]:
@@ -2138,6 +2554,12 @@ def list_analytics_developers(
         if created_by:
             where_clauses.append("developer = ?")
             params.append(created_by)
+        if developers:
+            normalized = [str(d).strip().lower() for d in developers if str(d).strip()]
+            if normalized:
+                placeholders = ",".join("?" for _ in normalized)
+                where_clauses.append(f"LOWER(developer) IN ({placeholders})")
+                params.extend(normalized)
         if start_bound:
             where_clauses.append("date(created_at) >= date(?)")
             params.append(start_bound)

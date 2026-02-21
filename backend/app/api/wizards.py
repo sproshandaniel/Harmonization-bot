@@ -47,8 +47,5 @@ def delete_wizard_route(wizard_id: str, request: Request):
     user = get_request_user(request)
     deleted = delete_wizard(wizard_id, created_by=user)
     if not deleted:
-        # Fallback: allow delete even if created_by does not match
-        deleted = delete_wizard(wizard_id, created_by=None)
-    if not deleted:
         raise HTTPException(status_code=404, detail="Wizard not found")
     return {"deleted": True}

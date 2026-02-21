@@ -53,6 +53,7 @@ async def extract_rule(
         wizard_step_no=wizard_step_no,
         wizard_total_steps=wizard_total_steps,
         template_use_ai=template_use_ai,
+        created_by=created_by,
     )
 
     return {

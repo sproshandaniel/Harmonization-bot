@@ -7,6 +7,7 @@ from app.services.store_service import (
     backfill_template_metadata,
     create_rule_pack_option,
     delete_rule_pack_option,
+    get_llm_usage_daily_cost,
     get_rule_pack_options,
     get_app_settings,
     get_ui_config,
@@ -21,6 +22,11 @@ router = APIRouter()
 @router.get("/settings")
 def app_settings():
     return get_app_settings()
+
+
+@router.get("/settings/llm-usage/daily-cost")
+def llm_usage_daily_cost(days: int = Query(default=30, ge=1, le=365)):
+    return get_llm_usage_daily_cost(days=days)
 
 
 @router.put("/settings")

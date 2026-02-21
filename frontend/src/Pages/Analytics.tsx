@@ -15,6 +15,9 @@ type Summary = {
   total_rules: number;
   saved_rules: number;
   overall_compliance: number;
+  rules_created_today?: number;
+  rules_created_last_7d?: number;
+  rules_created_last_30d?: number;
 };
 
 type CompliancePoint = {
@@ -44,6 +47,7 @@ type TopViolation = {
 
 type AnalyticsResponse = {
   summary: Summary;
+  top_rule_creators?: { creator: string; count: number }[];
   compliance_trend: CompliancePoint[];
   violation_heatmap: HeatPoint[];
   lifecycle_funnel: FunnelPoint[];
@@ -99,6 +103,7 @@ const CHART_COLORS = {
 
 const emptyData: AnalyticsResponse = {
   summary: { total_rules: 0, saved_rules: 0, overall_compliance: 0 },
+  top_rule_creators: [],
   compliance_trend: [],
   violation_heatmap: [],
   lifecycle_funnel: [],
@@ -132,9 +137,8 @@ export default function Analytics() {
       if (startDate) params.set("start_date", startDate);
       if (endDate) params.set("end_date", endDate);
     }
-    const developerParams = new URLSearchParams(params);
-    if (entity === "developer" && selectedDeveloper) {
-      developerParams.set("developer", selectedDeveloper);
+    if (selectedDeveloper) {
+      params.set("developer", selectedDeveloper);
     }
     const run = async () => {
       try {
@@ -142,7 +146,7 @@ export default function Analytics() {
         setError(null);
         const [overviewRes, developerRes, developerOptionsRes] = await Promise.all([
           fetch(`/api/analytics/overview?${params.toString()}`),
-          fetch(`/api/analytics/developers?${developerParams.toString()}`),
+          fetch(`/api/analytics/developers?${params.toString()}`),
           fetch(`/api/analytics/developer-options?${params.toString()}`),
         ]);
         if (!overviewRes.ok) throw new Error(`Analytics API failed (${overviewRes.status})`);
@@ -158,7 +162,7 @@ export default function Analytics() {
           setDeveloperData(developerJson);
           const options = Array.isArray(optionsJson.developers) ? optionsJson.developers : [];
           setDeveloperOptions(options);
-          if (entity === "developer" && selectedDeveloper && !options.includes(selectedDeveloper)) {
+          if (selectedDeveloper && !options.includes(selectedDeveloper)) {
             setSelectedDeveloper("");
           }
         }
@@ -173,7 +177,7 @@ export default function Analytics() {
     return () => {
       active = false;
     };
-  }, [entity, period, startDate, endDate, selectedDeveloper]);
+  }, [period, startDate, endDate, selectedDeveloper]);
 
   const heatData = useMemo(
     () =>
@@ -198,11 +202,28 @@ export default function Analytics() {
 
   return (
     <div className="p-6 space-y-6">
-      <div>
-        <h2 className="text-2xl font-semibold text-indigo-700">Analytics</h2>
-        <p className="text-sm text-gray-600 mt-1">
-          Compliance, violations and developer insights with time-based filtering.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-2xl font-semibold text-indigo-700">Analytics</h2>
+          <p className="text-sm text-gray-600 mt-1">
+            Compliance, violations and developer insights with time-based filtering.
+          </p>
+        </div>
+        {selectedDeveloper ? (
+          <div className="inline-flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs text-indigo-700">
+            <span className="font-medium">Developer:</span>
+            <span>{selectedDeveloper}</span>
+            <button
+              type="button"
+              onClick={() => setSelectedDeveloper("")}
+              className="rounded-full border border-indigo-300 px-2 py-0.5 text-[11px] hover:bg-indigo-100"
+              aria-label="Clear developer filter"
+              title="Clear developer filter"
+            >
+              Clear
+            </button>
+          </div>
+        ) : null}
       </div>
 
       <div className="bg-white border rounded-lg p-4 shadow-sm">
@@ -257,8 +278,7 @@ export default function Analytics() {
             <select
               value={selectedDeveloper}
               onChange={(e) => setSelectedDeveloper(e.target.value)}
-              disabled={entity !== "developer"}
-              className="w-full border rounded px-2 py-2 text-sm disabled:bg-gray-100"
+              className="w-full border rounded px-2 py-2 text-sm"
             >
               <option value="">All Developers</option>
               {developerOptions.map((developer) => (
@@ -275,6 +295,35 @@ export default function Analytics() {
         <div className="rounded border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
           {error}
         </div>
+      )}
+
+      {entity === "rules" && (
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+        <div className="bg-white border rounded-lg p-4 shadow-sm">
+          <p className="text-xs text-gray-500">Rules Created (Today)</p>
+          <p className="text-2xl font-semibold text-indigo-700">
+            {data.summary.rules_created_today ?? 0}
+          </p>
+        </div>
+        <div className="bg-white border rounded-lg p-4 shadow-sm">
+          <p className="text-xs text-gray-500">Rules Created (Last 7 Days)</p>
+          <p className="text-2xl font-semibold text-indigo-700">
+            {data.summary.rules_created_last_7d ?? 0}
+          </p>
+        </div>
+        <div className="bg-white border rounded-lg p-4 shadow-sm">
+          <p className="text-xs text-gray-500">Rules Created (Last 30 Days)</p>
+          <p className="text-2xl font-semibold text-indigo-700">
+            {data.summary.rules_created_last_30d ?? 0}
+          </p>
+        </div>
+        <div className="bg-white border rounded-lg p-4 shadow-sm">
+          <p className="text-xs text-gray-500">Compliance (Current Range)</p>
+          <p className="text-2xl font-semibold text-green-700">
+            {data.summary.overall_compliance ?? 0}%
+          </p>
+        </div>
+      </div>
       )}
 
       {entity === "rules" && (
@@ -324,23 +373,6 @@ export default function Analytics() {
 
         <section className="bg-white border rounded-lg p-4 shadow-sm">
           <h3 className="text-sm font-semibold text-gray-700 mb-3">
-            Rule Lifecycle Funnel
-          </h3>
-          <div className="h-64">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={data.lifecycle_funnel} barCategoryGap="32%">
-                <CartesianGrid stroke={CHART_COLORS.grid} strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="stage" />
-                <YAxis />
-                <Tooltip />
-                <Bar dataKey="count" fill={CHART_COLORS.barPositive} radius={[3, 3, 0, 0]} barSize={12} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </section>
-
-        <section className="bg-white border rounded-lg p-4 shadow-sm">
-          <h3 className="text-sm font-semibold text-gray-700 mb-3">
             Top Repeated Violations
           </h3>
           <div className="overflow-auto max-h-64">
@@ -373,6 +405,23 @@ export default function Analytics() {
                 )}
               </tbody>
             </table>
+          </div>
+        </section>
+
+        <section className="bg-white border rounded-lg p-4 shadow-sm">
+          <h3 className="text-sm font-semibold text-gray-700 mb-3">
+            Top Rule Authors (Shared Contributors)
+          </h3>
+          <div className="h-64">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={data.top_rule_creators || []} barCategoryGap="30%">
+                <CartesianGrid stroke={CHART_COLORS.grid} strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="creator" interval={0} angle={-20} height={70} textAnchor="end" />
+                <YAxis />
+                <Tooltip />
+                <Bar dataKey="count" fill={CHART_COLORS.barPositive} radius={[3, 3, 0, 0]} barSize={12} />
+              </BarChart>
+            </ResponsiveContainer>
           </div>
         </section>
       </div>

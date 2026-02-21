@@ -6,15 +6,12 @@ from app.api.auth_context import get_request_user
 from app.services.store_service import (
     compute_analytics_overview,
     compute_developer_analytics,
+    get_managed_developers_for_architect,
+    get_show_shared_rules_enabled,
     list_analytics_developers,
 )
 
 router = APIRouter()
-
-
-def _resolve_scope_user(user: str) -> str | None:
-    # Architects can inspect broader analytics; others stay user-scoped.
-    return None if "architect" in (user or "").lower() else user
 
 
 def _resolve_period_bounds(
@@ -39,12 +36,16 @@ def get_analytics_overview(
     period: str = Query(default="week"),
     start_date: str | None = Query(default=None),
     end_date: str | None = Query(default=None),
+    developer: str | None = Query(default=None),
 ):
     user = get_request_user(request)
-    scoped_user = _resolve_scope_user(user)
+    shared_visible = get_show_shared_rules_enabled(default=True)
+    scoped_user = None if shared_visible else user
     start_bound, end_bound = _resolve_period_bounds(period, start_date, end_date)
     return compute_analytics_overview(
         created_by=scoped_user,
+        developers=None,
+        developer=developer,
         start_date=start_bound,
         end_date=end_bound,
     )
@@ -59,10 +60,13 @@ def get_developer_analytics(
     developer: str | None = Query(default=None),
 ):
     user = get_request_user(request)
-    scoped_user = _resolve_scope_user(user)
+    shared_visible = get_show_shared_rules_enabled(default=True)
+    managed_developers = get_managed_developers_for_architect(user) if shared_visible else []
+    scoped_user = None if managed_developers else user
     start_bound, end_bound = _resolve_period_bounds(period, start_date, end_date)
     return compute_developer_analytics(
         created_by=scoped_user,
+        developers=managed_developers or None,
         developer=developer,
         start_date=start_bound,
         end_date=end_bound,
@@ -77,11 +81,14 @@ def get_analytics_developer_options(
     end_date: str | None = Query(default=None),
 ):
     user = get_request_user(request)
-    scoped_user = _resolve_scope_user(user)
+    shared_visible = get_show_shared_rules_enabled(default=True)
+    managed_developers = get_managed_developers_for_architect(user) if shared_visible else []
+    scoped_user = None if managed_developers else user
     start_bound, end_bound = _resolve_period_bounds(period, start_date, end_date)
     return {
         "developers": list_analytics_developers(
             created_by=scoped_user,
+            developers=managed_developers or None,
             start_date=start_bound,
             end_date=end_bound,
         )

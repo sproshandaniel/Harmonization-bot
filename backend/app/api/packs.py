@@ -6,6 +6,7 @@ from app.services.store_service import (
     delete_rule_by_row_id,
     delete_rule_pack,
     get_rules_for_pack,
+    get_show_shared_rules_enabled,
     list_rule_packs,
     save_rule_pack,
     update_rule_yaml_by_row_id,
@@ -28,15 +29,27 @@ class RuleYamlUpdateIn(BaseModel):
 @router.get("/packs")
 def get_packs(request: Request):
     user = get_request_user(request)
-    return {"packs": list_rule_packs(created_by=user)}
+    shared_visible = get_show_shared_rules_enabled(default=True)
+    return {"packs": list_rule_packs(created_by=None if shared_visible else user)}
 
 
 @router.get("/packs/{pack_name}/rules")
-def get_pack_rules(pack_name: str, request: Request, project_id: str | None = Query(default=None)):
+def get_pack_rules(
+    pack_name: str,
+    request: Request,
+    project_id: str | None = Query(default=None),
+    q: str | None = Query(default=None),
+):
     user = get_request_user(request)
+    shared_visible = get_show_shared_rules_enabled(default=True)
     return {
         "pack_name": pack_name,
-        "rules": get_rules_for_pack(pack_name, project_id=project_id, created_by=user),
+        "rules": get_rules_for_pack(
+            pack_name,
+            project_id=project_id,
+            created_by=None if shared_visible else user,
+            q=q,
+        ),
     }
 
 
@@ -66,14 +79,6 @@ def update_pack_rule(pack_name: str, rule_row_id: int, payload: RuleYamlUpdateIn
             yaml_text=payload.yaml,
             created_by=user,
         )
-        # Shared governance assets may not match current created_by; allow fallback update.
-        if not updated and user:
-            updated = update_rule_yaml_by_row_id(
-                pack_name=pack_name,
-                row_id=rule_row_id,
-                yaml_text=payload.yaml,
-                created_by=None,
-            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not updated:

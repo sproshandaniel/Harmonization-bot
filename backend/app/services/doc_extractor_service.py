@@ -17,6 +17,7 @@ async def process_document(
     wizard_step_no: int | None = None,
     wizard_total_steps: int | None = None,
     template_use_ai: bool = False,
+    created_by: str = "anonymous",
 ):
     filename = file.filename.lower()
     content = await file.read()
@@ -42,6 +43,7 @@ async def process_document(
         wizard_step_no=wizard_step_no,
         wizard_total_steps=wizard_total_steps,
         template_use_ai=template_use_ai,
+        created_by=created_by,
     )
     for rule in rules:
         rule["source_snippet"] = f"Extracted from document: {file.filename}"

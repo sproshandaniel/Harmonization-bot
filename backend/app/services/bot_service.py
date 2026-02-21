@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 from app.services.store_service import (
     create_dashboard_violation,
+    log_llm_usage_event,
     get_ai_llm_fallback_enabled,
     get_ai_model_name,
     get_model_api_key,
@@ -79,6 +80,25 @@ def _line_from_index(text: str, index: int) -> int:
 
 def _safe_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _extract_usage_tokens(usage: Any) -> tuple[int, int, int]:
+    if usage is None:
+        return 0, 0, 0
+    prompt = 0
+    completion = 0
+    total = 0
+    if isinstance(usage, dict):
+        prompt = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+        completion = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+        total = int(usage.get("total_tokens") or 0)
+    else:
+        prompt = int(getattr(usage, "prompt_tokens", 0) or getattr(usage, "input_tokens", 0) or 0)
+        completion = int(getattr(usage, "completion_tokens", 0) or getattr(usage, "output_tokens", 0) or 0)
+        total = int(getattr(usage, "total_tokens", 0) or 0)
+    if total <= 0:
+        total = max(0, prompt) + max(0, completion)
+    return max(0, prompt), max(0, completion), max(0, total)
 
 
 def _normalize_code_subtags(value: Any) -> list[str]:
@@ -277,71 +297,41 @@ def _load_rule_rows(
     return rows
 
 
-def _rank_rules(query: str, rules: list[ResolvedRule]) -> list[ResolvedRule]:
-    query_tokens = _tokenize(query)
-    if not query_tokens:
-        return rules[:]
-
-    scored: list[tuple[float, ResolvedRule]] = []
-    for rule in rules:
-        haystack = " ".join(
-            [
-                rule.title,
-                rule.description,
-                rule.message,
-                rule.selector_pattern,
-                rule.fix,
-                rule.rationale,
-                rule.template_snippet,
-                rule.wizard_snippet,
-                rule.rule_id,
-                rule.rule_type,
-            ]
-        )
-        tokens = _tokenize(haystack)
-        overlap = len(query_tokens & tokens)
-        score = float(overlap)
-        if query.lower() in haystack.lower():
-            score += 2.0
-        if rule.rule_type in {"template", "wizard"} and (
-            "template" in query.lower() or "wizard" in query.lower()
-        ):
-            score += 2.0
-        if score > 0:
-            scored.append((score, rule))
-
-    if not scored:
-        return rules[:]
-
-    scored.sort(key=lambda item: item[0], reverse=True)
-    return [item[1] for item in scored]
-
-
-def _vector_rank(query: str, rules: list[ResolvedRule]) -> list[ResolvedRule]:
+def _vector_scores(query: str, rules: list[ResolvedRule], developer: str) -> dict[str, float]:
     client = _get_embed_client()
     if client is None:
-        return []
+        return {}
     try:
-        vector = client.embeddings.create(
+        embed_response = client.embeddings.create(
             model="text-embedding-3-small",
             input=query,
-        ).data[0].embedding
-        hits = search_rule_vectors(vector, limit=10)
+        )
+        vector = embed_response.data[0].embedding
+        hits = search_rule_vectors(vector, limit=25)
+        in_tokens, out_tokens, total_tokens = _extract_usage_tokens(getattr(embed_response, "usage", None))
+        if total_tokens > 0:
+            log_llm_usage_event(
+                developer=developer,
+                feature="rule_retrieval_embedding",
+                provider="openai",
+                model="text-embedding-3-small",
+                input_tokens=in_tokens if in_tokens > 0 else total_tokens,
+                output_tokens=out_tokens,
+                total_tokens=total_tokens,
+                metadata={"query_length": len(query or "")},
+            )
     except Exception:
-        return []
+        return {}
 
     by_id = {rule.rule_id: rule for rule in rules}
-    ranked: list[ResolvedRule] = []
-    seen: set[str] = set()
+    scores: dict[str, float] = {}
     for hit in hits:
         rid = str(hit.get("id") or "").strip()
-        if not rid or rid in seen:
+        if not rid:
             continue
-        rule = by_id.get(rid)
-        if rule:
-            ranked.append(rule)
-            seen.add(rid)
-    return ranked
+        if rid in by_id:
+            scores[rid] = max(scores.get(rid, 0.0), float(hit.get("score") or 0.0))
+    return scores
 
 
 def _validate_code(code: str, rules: list[ResolvedRule]) -> list[dict[str, Any]]:
@@ -475,7 +465,148 @@ def _extract_query_intent(query: str) -> dict[str, bool]:
         "wants_country": any(term in q for term in ("country", "molga", "land1", "nationality")),
         "wants_manager_scope": any(term in q for term in ("manager", "reportee", "teamviewer", "mss")),
         "wants_employee": any(term in q for term in ("employee", "pernr", "personnel", "emp")),
+        "wants_factory_pattern": bool(re.search(r"\bfactory(\s+pattern)?\b", q)),
+        "wants_singleton_pattern": bool(re.search(r"\bsingleton(\s+pattern)?\b", q)),
+        "wants_strategy_pattern": bool(re.search(r"\bstrategy(\s+pattern)?\b", q)),
+        "wants_builder_pattern": bool(re.search(r"\bbuilder(\s+pattern)?\b", q)),
     }
+
+
+def _query_has_design_pattern_intent(intent: dict[str, bool]) -> bool:
+    return any(
+        [
+            intent["wants_factory_pattern"],
+            intent["wants_singleton_pattern"],
+            intent["wants_strategy_pattern"],
+            intent["wants_builder_pattern"],
+        ]
+    )
+
+
+def _rule_haystack(rule: ResolvedRule) -> str:
+    return " ".join(
+        [
+            rule.title,
+            rule.description,
+            rule.message,
+            rule.selector_pattern,
+            rule.fix,
+            rule.rationale,
+            rule.template_snippet,
+            rule.wizard_snippet,
+            rule.rule_id,
+            rule.rule_type,
+            " ".join([str(v) for v in rule.metadata.values()]),
+        ]
+    ).lower()
+
+
+def _compute_rule_relevance(
+    query: str,
+    intent: dict[str, bool],
+    rule: ResolvedRule,
+    vector_score: float = 0.0,
+) -> float:
+    haystack = _rule_haystack(rule)
+    query_text = (query or "").strip().lower()
+    query_tokens = _tokenize(query_text)
+    if not query_tokens:
+        return 0.0
+
+    overlap = len(query_tokens & _tokenize(haystack))
+    score = float(overlap)
+    if query_text and query_text in haystack:
+        score += 2.5
+
+    # Blend lexical and vector semantic signal.
+    score += max(0.0, min(1.0, vector_score)) * 3.0
+
+    # Template/wizard prompts should prefer template/wizard assets.
+    if _is_template_or_wizard_request(query_text):
+        if rule.rule_type in {"template", "wizard"}:
+            score += 1.5
+        else:
+            score -= 1.5
+
+    # Penalize domain templates when asking design patterns.
+    if _query_has_design_pattern_intent(intent):
+        domain_noise = ("employee", "pernr", "molga", "reportee", "manager", "country")
+        if any(term in haystack for term in domain_noise):
+            score -= 4.0
+
+    pattern_expectations = [
+        (intent["wants_factory_pattern"], ("factory", "creator", "create object", "instantiate")),
+        (intent["wants_singleton_pattern"], ("singleton", "get_instance", "create private")),
+        (intent["wants_strategy_pattern"], ("strategy", "interface", "polymorph")),
+        (intent["wants_builder_pattern"], ("builder", "director", "build")),
+    ]
+    for requested, hints in pattern_expectations:
+        if not requested:
+            continue
+        if any(h in haystack for h in hints):
+            score += 7.0
+        else:
+            score -= 7.0
+
+    if intent["wants_country"]:
+        if any(term in haystack for term in ("country", "molga", "land1", "nationality")):
+            score += 5.0
+        if any(term in haystack for term in ("manager", "reportee", "teamviewer", "mss")):
+            score -= 3.0
+
+    if intent["wants_manager_scope"]:
+        if any(term in haystack for term in ("manager", "reportee", "teamviewer", "mss")):
+            score += 5.0
+        if any(term in haystack for term in ("country", "molga", "land1", "nationality")):
+            score -= 2.0
+
+    if intent["wants_employee"] and "employee" in haystack:
+        score += 1.0
+
+    return score
+
+
+def _min_relevance_threshold(query: str, intent: dict[str, bool], is_validate: bool) -> float:
+    if is_validate:
+        return 0.5
+    if _query_has_design_pattern_intent(intent):
+        return 4.0
+    if _is_template_or_wizard_request(query):
+        return 2.0
+    return 1.5
+
+
+def _filter_candidate_pool(query: str, rules: list[ResolvedRule], is_validate: bool) -> list[ResolvedRule]:
+    if is_validate:
+        return [r for r in rules if r.rule_type in {"code", "design"}]
+    if _is_template_or_wizard_request(query):
+        return [r for r in rules if r.rule_type in {"template", "wizard"}]
+    return [r for r in rules if r.rule_type in {"code", "design", "template", "wizard"}]
+
+
+def _rank_rules(
+    query: str,
+    rules: list[ResolvedRule],
+    is_validate: bool,
+    developer: str,
+) -> tuple[list[ResolvedRule], dict[str, float]]:
+    if not rules:
+        return [], {}
+    intent = _extract_query_intent(query)
+    threshold = _min_relevance_threshold(query, intent, is_validate)
+    candidate_pool = _filter_candidate_pool(query, rules, is_validate)
+    vector_map = _vector_scores(query, candidate_pool, developer=developer)
+
+    scored: list[tuple[float, ResolvedRule]] = []
+    for rule in candidate_pool:
+        score = _compute_rule_relevance(query, intent, rule, vector_map.get(rule.rule_id, 0.0))
+        if score >= threshold:
+            scored.append((score, rule))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    ranked = [item[1] for item in scored]
+    score_map = {rule.rule_id: score for score, rule in scored}
+    return ranked, score_map
 
 
 def _template_intent_score(query: str, rule: ResolvedRule) -> float:
@@ -491,37 +622,21 @@ def _template_intent_score(query: str, rule: ResolvedRule) -> float:
             " ".join([str(v) for v in rule.metadata.values()]),
         ]
     ).lower()
-    q_tokens = _tokenize(query)
-    h_tokens = _tokenize(haystack)
-    score = float(len(q_tokens & h_tokens))
-
-    if intent["wants_employee"] and "employee" in haystack:
-        score += 1.5
-
-    if intent["wants_country"]:
-        if any(term in haystack for term in ("country", "molga", "land1", "nationality")):
-            score += 6.0
-        if any(term in haystack for term in ("manager", "reportee", "teamviewer", "mss")):
-            score -= 3.0
-
-    if intent["wants_manager_scope"]:
-        if any(term in haystack for term in ("manager", "reportee", "teamviewer", "mss")):
-            score += 5.0
-        if any(term in haystack for term in ("country", "molga", "land1", "nationality")):
-            score -= 1.0
-
-    return score
+    return _compute_rule_relevance(query, intent, rule, vector_score=0.0)
 
 
 def _build_suggestions_for_query(query: str, rules: list[ResolvedRule], top_k: int) -> dict[str, list[dict[str, str]]]:
     template_rules = [r for r in rules if r.rule_type == "template" and r.template_snippet]
     wizard_rules = [r for r in rules if r.rule_type == "wizard" and r.wizard_snippet]
-
-    ranked_templates = sorted(
-        template_rules,
-        key=lambda rule: _template_intent_score(query, rule),
+    scored_templates = sorted(
+        [(_template_intent_score(query, rule), rule) for rule in template_rules],
+        key=lambda item: item[0],
         reverse=True,
     )
+    intent = _extract_query_intent(query)
+    is_design_pattern_request = _query_has_design_pattern_intent(intent)
+    min_score = 3.0 if is_design_pattern_request else 1.5
+    ranked_templates = [rule for score, rule in scored_templates if score >= min_score]
 
     ranked_rules: list[ResolvedRule] = []
     ranked_rules.extend(ranked_templates)
@@ -570,30 +685,13 @@ def _is_template_or_wizard_request(query: str) -> bool:
 
 
 def _has_satisfactory_rule_match(query: str, rules: list[ResolvedRule]) -> bool:
-    q = (query or "").strip().lower()
-    if not q:
-        return False
-    query_tokens = _tokenize(q)
-    if not query_tokens:
+    intent = _extract_query_intent(query)
+    threshold = _min_relevance_threshold(query, intent, is_validate=False)
+    if not (query or "").strip():
         return False
 
     for rule in rules:
-        haystack = " ".join(
-            [
-                rule.title,
-                rule.description,
-                rule.message,
-                rule.selector_pattern,
-                rule.fix,
-                rule.rationale,
-                rule.rule_id,
-                rule.rule_type,
-            ]
-        ).lower()
-        if q in haystack:
-            return True
-        overlap = len(query_tokens & _tokenize(haystack))
-        if overlap >= 2:
+        if _compute_rule_relevance(query, intent, rule, 0.0) >= threshold:
             return True
     return False
 
@@ -604,6 +702,7 @@ def _generate_llm_fallback_answer(
     retrieved: list[ResolvedRule],
     suggestions: dict[str, list[dict[str, str]]],
     top_k: int,
+    developer: str,
 ) -> str | None:
     client = _get_embed_client()
     if client is None:
@@ -663,6 +762,18 @@ def _generate_llm_fallback_answer(
             temperature=0.2,
             max_tokens=700,
         )
+        in_tokens, out_tokens, total_tokens = _extract_usage_tokens(getattr(response, "usage", None))
+        if total_tokens > 0:
+            log_llm_usage_event(
+                developer=developer,
+                feature="llm_fallback_chat",
+                provider="openai",
+                model=model,
+                input_tokens=in_tokens,
+                output_tokens=out_tokens,
+                total_tokens=total_tokens,
+                metadata={"context_rules": len(retrieved), "context_templates": len(suggestions.get("templates", []))},
+            )
         content = response.choices[0].message.content if response.choices else ""
         return (content or "").strip() or None
     except Exception:
@@ -681,7 +792,7 @@ def _log_violations_to_dashboard(
             create_dashboard_violation(
                 rule_pack=str(violation.get("rule_pack") or "generic"),
                 object_name=object_name,
-                transport=transport,
+                transport=transport or "",
                 developer=developer,
                 severity=str(violation.get("severity") or "MAJOR"),
             )
@@ -698,7 +809,7 @@ def assist_with_rules(
     project_id: str | None = None,
     pack_name: str | None = None,
     developer: str = "name@zalaris.com",
-    transport: str = "ADT",
+    transport: str = "",
     created_by: str | None = None,
     top_k: int = 5,
     log_violations: bool = True,
@@ -706,23 +817,17 @@ def assist_with_rules(
 ) -> dict[str, Any]:
     rule_rows = _load_rule_rows(project_id=project_id, pack_name=pack_name, created_by=created_by)
     resolved = [rule for row in rule_rows if (rule := _resolve_rule(row)) is not None]
+    is_validate = _is_validation_query(query)
 
-    lex_ranked = _rank_rules(query, resolved)
-    vec_ranked = _vector_rank(query, resolved)
-
-    merged: list[ResolvedRule] = []
-    seen_ids: set[str] = set()
-    for bucket in (vec_ranked, lex_ranked):
-        for rule in bucket:
-            if rule.rule_id in seen_ids:
-                continue
-            merged.append(rule)
-            seen_ids.add(rule.rule_id)
-    if not merged:
-        merged = resolved[:]
+    ranked, relevance_scores = _rank_rules(
+        query,
+        resolved,
+        is_validate=is_validate,
+        developer=developer,
+    )
+    merged = ranked
 
     retrieved = merged[: max(1, min(top_k, 10))]
-    is_validate = _is_validation_query(query)
     violations = _validate_code(code, resolved) if is_validate else []
     logged = 0
     if log_violations and violations:
@@ -735,7 +840,7 @@ def assist_with_rules(
 
     wants_template = _is_template_or_wizard_request(query)
     if wants_template:
-        template_pool = [r for r in merged if r.rule_type in {"template", "wizard"}]
+        template_pool = [r for r in retrieved if r.rule_type in {"template", "wizard"}]
         if not template_pool:
             template_pool = [r for r in resolved if r.rule_type in {"template", "wizard"}]
         suggestions = _build_suggestions_for_query(query, template_pool, top_k=min(3, top_k))
@@ -746,7 +851,7 @@ def assist_with_rules(
     satisfactory = (
         bool(violations)
         or (wants_template and (bool(suggestions["templates"]) or bool(suggestions["wizards"])))
-        or (not wants_template and _has_satisfactory_rule_match(query, retrieved))
+        or (not wants_template and bool(ranked))
     )
     llm_fallback = {
         "enabled": llm_fallback_enabled,
@@ -765,6 +870,7 @@ def assist_with_rules(
                 retrieved=retrieved,
                 suggestions=suggestions,
                 top_k=top_k,
+                developer=developer,
             )
             if llm_answer:
                 llm_fallback["used"] = True
@@ -805,6 +911,7 @@ def assist_with_rules(
                 "rule_pack": rule.rule_pack,
                 "description": rule.description,
                 "selector_pattern": rule.selector_pattern,
+                "relevance": round(float(relevance_scores.get(rule.rule_id, 0.0)), 3),
             }
             for rule in retrieved
         ],

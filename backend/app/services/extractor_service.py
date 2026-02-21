@@ -16,7 +16,7 @@ import yaml
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from app.services.store_service import get_ai_model_name, get_model_api_key
+from app.services.store_service import get_ai_model_name, get_model_api_key, log_llm_usage_event
 from app.services.vector_store_service import find_duplicate_rule, upsert_rule_vector
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -113,6 +113,22 @@ def _get_openai_client():
         _OPENAI_CLIENT = None
         _OPENAI_CLIENT_KEY = ""
         return None
+
+
+def _extract_usage_tokens(usage: Any) -> tuple[int, int, int]:
+    if usage is None:
+        return 0, 0, 0
+    if isinstance(usage, dict):
+        in_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+        out_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+        total_tokens = int(usage.get("total_tokens") or 0)
+    else:
+        in_tokens = int(getattr(usage, "input_tokens", 0) or getattr(usage, "prompt_tokens", 0) or 0)
+        out_tokens = int(getattr(usage, "output_tokens", 0) or getattr(usage, "completion_tokens", 0) or 0)
+        total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+    if total_tokens <= 0:
+        total_tokens = max(0, in_tokens) + max(0, out_tokens)
+    return max(0, in_tokens), max(0, out_tokens), max(0, total_tokens)
 
 EXTRACTION_PROMPT = """
 You are an ABAP coding standards expert.
@@ -282,6 +298,36 @@ def _derive_template_selector_pattern(snippet: str, title: str, description: str
     return slug or "abap_template"
 
 
+def _template_code_signature(snippet: str, selector_pattern: str) -> str:
+    source = str(snippet or "").strip()
+    if not source:
+        return str(selector_pattern or "").strip() or "abap_template"
+
+    method_call = re.search(r"\b([A-Z0-9_]+)=>([A-Z0-9_]+)\s*\(", source, flags=re.IGNORECASE)
+    if method_call:
+        return f"{method_call.group(1)}=>{method_call.group(2)}"
+
+    function_call = re.search(r"\bCALL\s+FUNCTION\s+'?([A-Z0-9_]+)'?\b", source, flags=re.IGNORECASE)
+    if function_call:
+        return f"CALL FUNCTION {function_call.group(1)}"
+
+    class_decl = re.search(r"\bCLASS\s+([A-Z0-9_]+)\b", source, flags=re.IGNORECASE)
+    if class_decl:
+        return f"CLASS {class_decl.group(1)}"
+
+    method_decl = re.search(r"\bMETHOD\s+([A-Z0-9_]+)\b", source, flags=re.IGNORECASE)
+    if method_decl:
+        return f"METHOD {method_decl.group(1)}"
+
+    for line in source.splitlines():
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        return cleaned[:72]
+    return str(selector_pattern or "").strip() or "abap_template"
+
+
 def _collect_template_intent_terms(selector_pattern: str, snippet: str) -> list[str]:
     source = f"{selector_pattern}\n{snippet}".lower()
     words = re.findall(r"[a-z0-9_]{2,}", source)
@@ -377,6 +423,7 @@ def _normalize_template_rule(
     title = str(rule_obj.get("title") or "").strip()
     description = str(rule_obj.get("description") or "").strip()
     selector_pattern = _derive_template_selector_pattern(snippet, title, description)
+    code_signature = _template_code_signature(snippet, selector_pattern)
     intent_terms = _collect_template_intent_terms(selector_pattern, snippet)
     intent_text = ", ".join(intent_terms[:5]) if intent_terms else "general reusable ABAP operations"
 
@@ -387,12 +434,16 @@ def _normalize_template_rule(
         description = ""
 
     if not title:
-        title = f"Reusable template: {selector_pattern} ({intent_text})"
+        title = f"Template: {selector_pattern} [{code_signature}]"
+    elif code_signature and code_signature.lower() not in title.lower():
+        title = f"{title} [{code_signature}]"
     if not description:
         description = (
-            f"Reusable ABAP template snippet for {selector_pattern}. "
+            f"Reusable ABAP template snippet for {selector_pattern} ({code_signature}). "
             f"Useful for requests about {intent_text}."
         )
+    elif code_signature and code_signature.lower() not in description.lower():
+        description = f"{description} Primary code signature: {code_signature}."
     combined_text = "\n".join([title, description, selector_pattern, snippet]).lower()
     scope = _infer_template_scope(combined_text)
     intent = _infer_template_intent(combined_text)
@@ -412,8 +463,10 @@ def _normalize_template_rule(
         confidence = confidence / 100.0
     confidence = max(0.0, min(1.0, confidence))
 
+    hash_part = hashlib.sha1(snippet.encode("utf-8", "ignore")).hexdigest()[:10] if snippet else str(idx)
+    search_slug = _slug_for_id(f"{selector_pattern}.{code_signature}")[:48]
     default_id = (
-        f"abap.template.{hashlib.sha1(snippet.encode('utf-8', 'ignore')).hexdigest()[:10]}"
+        f"abap.template.{search_slug}.{hash_part}"
         if snippet
         else f"abap.template.{idx}"
     )
@@ -447,6 +500,7 @@ def _normalize_template_rule(
             "keywords": intent_terms,
             "source_type": "template",
             "confidence": confidence,
+            "code_signature": code_signature,
         },
         "template": {
             "language": "ABAP",
@@ -1106,6 +1160,7 @@ async def extract_rules_pipeline(
     wizard_step_no: int | None = None,
     wizard_total_steps: int | None = None,
     template_use_ai: bool = False,
+    created_by: str = "anonymous",
 ) -> list[dict[str, Any]]:
     """
     Generate multiple rule YAML cards using GPT and detect duplicates using Qdrant.
@@ -1151,6 +1206,18 @@ confidence: 0.2
             temperature=0.2,
             max_output_tokens=1600,
         )
+        in_tokens, out_tokens, total_tokens = _extract_usage_tokens(getattr(completion, "usage", None))
+        if total_tokens > 0:
+            log_llm_usage_event(
+                developer=created_by,
+                feature="rule_extraction_generation",
+                provider="openai",
+                model=model_name,
+                input_tokens=in_tokens,
+                output_tokens=out_tokens,
+                total_tokens=total_tokens,
+                metadata={"rule_type": normalized_rule_type},
+            )
         generated_yaml = completion.output_text.strip()
         rule_objects = _extract_rule_objects(
             generated_yaml,
@@ -1213,14 +1280,23 @@ confidence: 0.3
             rule_yaml = _safe_rule_yaml(rule_obj)
             if normalized_rule_type == "template":
                 rule_yaml = _ensure_template_snippet_yaml(rule_yaml, raw_text)
-            embedding = (
-                client.embeddings.create(
-                    model="text-embedding-3-small",
-                    input=_embedding_text(rule_obj, rule_yaml),
-                )
-                .data[0]
-                .embedding
+            embedding_response = client.embeddings.create(
+                model="text-embedding-3-small",
+                input=_embedding_text(rule_obj, rule_yaml),
             )
+            embedding = embedding_response.data[0].embedding
+            emb_in, emb_out, emb_total = _extract_usage_tokens(getattr(embedding_response, "usage", None))
+            if emb_total > 0:
+                log_llm_usage_event(
+                    developer=created_by,
+                    feature="rule_extraction_embedding",
+                    provider="openai",
+                    model="text-embedding-3-small",
+                    input_tokens=emb_in if emb_in > 0 else emb_total,
+                    output_tokens=emb_out,
+                    total_tokens=emb_total,
+                    metadata={"rule_type": normalized_rule_type},
+                )
             duplicate_id, similarity = find_duplicate_rule(embedding, threshold=0.88)
             new_id = str(rule_obj.get("id") or f"rule.{abs(hash(rule_yaml)) % (10**10)}")
             upsert_rule_vector(
@@ -1287,6 +1363,7 @@ async def extract_rules_multi_pipeline(
     wizard_step_no: int | None = None,
     wizard_total_steps: int | None = None,
     template_use_ai: bool = False,
+    created_by: str = "anonymous",
 ) -> list[dict[str, Any]]:
     selected_types = _normalize_rule_types(rule_types)
     safe_max = max(1, min(int(max_rules or 1), 10))
@@ -1303,6 +1380,7 @@ async def extract_rules_multi_pipeline(
             wizard_step_no=wizard_step_no,
             wizard_total_steps=wizard_total_steps,
             template_use_ai=template_use_ai,
+            created_by=created_by,
         )
 
     # Keep total extracted rules within requested max.
@@ -1325,6 +1403,7 @@ async def extract_rules_multi_pipeline(
             wizard_step_no=wizard_step_no if current_type == "wizard" else None,
             wizard_total_steps=wizard_total_steps if current_type == "wizard" else None,
             template_use_ai=template_use_ai if current_type == "template" else False,
+            created_by=created_by,
         )
         merged.extend(extracted)
 

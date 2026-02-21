@@ -27,6 +27,7 @@ type DashboardViolation = {
   developer: string;
   severity: string;
   status?: string;
+  date?: string;
 };
 
 type DashboardData = {
@@ -136,12 +137,22 @@ export default function Dashboard() {
                 <th className="py-2 px-3">Violation Object</th>
                 <th className="py-2 px-3">Transport</th>
                 <th className="py-2 px-3">Developer Name</th>
+                <th className="py-2 px-3">Date</th>
                 <th className="py-2 px-3">Severity</th>
                 <th className="py-2 px-3">Status</th>
               </tr>
             </thead>
             <tbody>
-              {data.violations.map((v, index) => (
+              {data.violations.map((v, index) => {
+                  const statusText = (v.status || "Not Fixed").trim();
+                  const normalizedStatus = statusText.toLowerCase().replace(/\s+/g, " ");
+                  const statusClass =
+                    normalizedStatus === "fixed"
+                      ? "text-emerald-700 font-semibold"
+                      : normalizedStatus === "not fixed"
+                      ? "text-red-700 font-semibold"
+                      : "text-gray-700";
+                  return (
                 <tr
                   key={`${v.transport}-${index}`}
                   className="border-b border-gray-100 hover:bg-gray-50 transition"
@@ -150,8 +161,9 @@ export default function Dashboard() {
                     {v.rulePack}
                   </td>
                   <td className="py-2 px-3 text-gray-700">{v.object}</td>
-                  <td className="py-2 px-3 text-gray-600">{v.transport}</td>
+                  <td className="py-2 px-3 text-gray-600">{(v.transport || "").trim() || "-"}</td>
                   <td className="py-2 px-3 text-gray-700">{v.developer}</td>
+                  <td className="py-2 px-3 text-gray-700">{v.date || "-"}</td>
                   <td
                     className={`py-2 px-3 font-semibold ${
                       v.severity === "Error"
@@ -161,12 +173,13 @@ export default function Dashboard() {
                   >
                     {v.severity}
                   </td>
-                  <td className="py-2 px-3 text-gray-700">{v.status || "Not Fixed"}</td>
+                  <td className={`py-2 px-3 ${statusClass}`}>{statusText}</td>
                 </tr>
-              ))}
+                  );
+                })}
               {data.violations.length === 0 && (
                 <tr>
-                  <td className="py-3 px-3 text-gray-500" colSpan={6}>
+                  <td className="py-3 px-3 text-gray-500" colSpan={7}>
                     No violations available yet.
                   </td>
                 </tr>

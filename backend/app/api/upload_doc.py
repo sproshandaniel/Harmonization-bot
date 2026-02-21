@@ -38,6 +38,7 @@ async def extract_from_document(
         wizard_step_no=wizard_step_no,
         wizard_total_steps=wizard_total_steps,
         template_use_ai=template_use_ai,
+        created_by=created_by,
     )
 
     return {"rules": rules, "rule_types": selected_types}

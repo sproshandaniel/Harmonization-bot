@@ -5,6 +5,7 @@ from app.api.auth_context import get_request_user
 from app.services.store_service import (
     add_rule_for_project,
     create_project,
+    get_show_shared_rules_enabled,
     get_rules_for_project,
     list_projects,
     update_project,
@@ -69,7 +70,9 @@ def put_project(project_id: str, payload: ProjectCreateIn):
 @router.get("/projects/{project_id}/rules")
 def get_project_rules(project_id: str, request: Request):
     user = get_request_user(request)
-    return {"rules": get_rules_for_project(project_id, created_by=user)}
+    shared_visible = get_show_shared_rules_enabled(default=True)
+    # Project rules are shared artifacts across project members.
+    return {"rules": get_rules_for_project(project_id, created_by=None if shared_visible else user)}
 
 
 @router.post("/projects/{project_id}/rules")

@@ -85,16 +85,6 @@ function AppShell({
             </h1>
           </div>
           <div className="flex items-center space-x-4">
-            <select
-              value={themeName}
-              onChange={(e) => onThemeChange(e.target.value)}
-              className="hb-theme-select"
-              aria-label="Select color theme"
-            >
-              <option value="aurora">Aurora Coast</option>
-              <option value="sunset">Sunset Sand</option>
-              <option value="spruce">Spruce Mint</option>
-            </select>
             <button
               onClick={handleHeaderRefresh}
               className="hb-icon-btn"
@@ -129,7 +119,10 @@ function AppShell({
             <Route path="/" element={<Dashboard />} />
             <Route path="/rule-packs" element={<RulePacks />} />
             <Route path="/analytics" element={<Analytics />} />
-            <Route path="/settings" element={<SettingsPage />} />
+            <Route
+              path="/settings"
+              element={<SettingsPage themeName={themeName} onThemeChange={onThemeChange} />}
+            />
             <Route path="/projects" element={<ProjectsPage />} />
           </Routes>
         </section>

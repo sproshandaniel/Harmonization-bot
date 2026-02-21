@@ -16,7 +16,7 @@ class BotAssistIn(BaseModel):
     project_id: str | None = None
     pack_name: str | None = None
     developer: str | None = None
-    transport: str = "ADT"
+    transport: str = ""
     top_k: int = Field(default=5, ge=1, le=10)
     log_violations: bool = True
     llm_fallback_confirmed: bool = False
@@ -49,7 +49,7 @@ class BotValidateIn(BaseModel):
     project_id: str | None = None
     pack_name: str | None = None
     developer: str | None = None
-    transport: str = "ADT"
+    transport: str = ""
     top_k: int = Field(default=20, ge=1, le=50)
     log_violations: bool = True
 

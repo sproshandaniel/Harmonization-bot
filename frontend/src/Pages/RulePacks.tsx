@@ -28,6 +28,7 @@ type PackRule = {
   yaml: string;
   confidence: number;
   category?: string;
+  created_by?: string;
   _id?: string;
   _severity?: string;
   status?: string;
@@ -35,6 +36,7 @@ type PackRule = {
 };
 
 export default function RulePacks() {
+  const currentUser = (localStorage.getItem("hb_user_email") || "").trim().toLowerCase();
   const [activeTab, setActiveTab] = useState<"packs" | "extractor">("packs");
   const [kpis, setKpis] = useState({
     code: 0,
@@ -59,6 +61,7 @@ export default function RulePacks() {
   const [packModalOpen, setPackModalOpen] = useState(false);
   const [selectedPackName, setSelectedPackName] = useState("");
   const [selectedPackRules, setSelectedPackRules] = useState<PackRule[]>([]);
+  const [ruleSearch, setRuleSearch] = useState("");
   const [loadingPackRules, setLoadingPackRules] = useState(false);
   const [expandedRuleKeys, setExpandedRuleKeys] = useState<Set<string>>(new Set());
   const [noticeOpen, setNoticeOpen] = useState(false);
@@ -155,6 +158,7 @@ export default function RulePacks() {
     try {
       setSelectedPackName(packName);
       setSelectedPackRules([]);
+      setRuleSearch("");
       setExpandedRuleKeys(new Set());
       setPackModalOpen(true);
       setLoadingPackRules(true);
@@ -336,8 +340,24 @@ export default function RulePacks() {
   }
 
   const wizardGroups = useMemo(() => {
+    const query = ruleSearch.trim().toLowerCase();
+    const filteredRules = query
+      ? selectedPackRules.filter((rule) => {
+          const haystack = [
+            rule._id || "",
+            rule.category || "",
+            rule._severity || "",
+            rule.rule_pack || "",
+            rule.yaml || "",
+          ]
+            .join("\n")
+            .toLowerCase();
+          return haystack.includes(query);
+        })
+      : selectedPackRules;
+
     const groups: Record<string, { name: string; steps: PackRule[]; deleteId: string }> = {};
-    for (const rule of selectedPackRules) {
+    for (const rule of filteredRules) {
       if ((rule.category || "").toLowerCase() !== "wizard") continue;
       let wizardId = "";
       let wizardName = "Wizard";
@@ -362,7 +382,25 @@ export default function RulePacks() {
       steps: data.steps,
       deleteId: data.deleteId,
     }));
-  }, [selectedPackRules]);
+  }, [selectedPackRules, ruleSearch]);
+
+  const visibleNonWizardRules = useMemo(() => {
+    const query = ruleSearch.trim().toLowerCase();
+    return selectedPackRules.filter((rule) => {
+      if ((rule.category || "").toLowerCase() === "wizard") return false;
+      if (!query) return true;
+      const haystack = [
+        rule._id || "",
+        rule.category || "",
+        rule._severity || "",
+        rule.rule_pack || "",
+        rule.yaml || "",
+      ]
+        .join("\n")
+        .toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [selectedPackRules, ruleSearch]);
 
   const mergedCodeTotal = kpis.code_total || (kpis.code + kpis.naming + kpis.performance);
   const mergedNamingTotal = kpis.code_naming || kpis.naming;
@@ -485,10 +523,22 @@ export default function RulePacks() {
           </div>
         }
       >
+        {!loadingPackRules && selectedPackRules.length > 0 && (
+          <div className="mb-3">
+            <input
+              className="w-full border rounded px-3 py-2 text-sm"
+              placeholder="Search rules in this pack (id, YAML, severity, category)"
+              value={ruleSearch}
+              onChange={(e) => setRuleSearch(e.target.value)}
+            />
+          </div>
+        )}
         {loadingPackRules ? (
           <p className="text-sm text-gray-500">Loading rules...</p>
         ) : selectedPackRules.length === 0 ? (
           <p className="text-sm text-gray-500">No rules found in this pack.</p>
+        ) : ruleSearch.trim() && wizardGroups.length === 0 && visibleNonWizardRules.length === 0 ? (
+          <p className="text-sm text-gray-500">No matching rules found for "{ruleSearch.trim()}".</p>
         ) : wizardGroups.length > 0 ? (
           <div className="space-y-3 max-h-[62vh] overflow-y-auto pr-1">
             {wizardGroups.map((wizard) => {
@@ -521,6 +571,9 @@ export default function RulePacks() {
                   {isOpen && (
                     <div className="space-y-3 p-3 bg-white">
                       {wizard.steps.map((rule, idx) => (
+                        (() => {
+                          const canEdit = !!rule.db_id && (!rule.created_by || String(rule.created_by).toLowerCase() === currentUser);
+                          return (
                         <div
                           key={`${rule._id || "rule"}-${idx}`}
                           className="border rounded-lg overflow-hidden"
@@ -541,7 +594,7 @@ export default function RulePacks() {
                             >
                               {expandedRuleKeys.has(String(rule._id ?? idx)) ? "Hide YAML" : "Show YAML"}
                             </button>
-                            {rule.db_id ? (
+                            {canEdit ? (
                               <button
                                 onClick={() => openEditYamlDialog(rule)}
                                 className="ml-3 text-xs text-indigo-600 hover:text-indigo-800 inline-flex items-center gap-1"
@@ -557,6 +610,8 @@ export default function RulePacks() {
                             </pre>
                           )}
                         </div>
+                          );
+                        })()
                       ))}
                     </div>
                   )}
@@ -566,7 +621,9 @@ export default function RulePacks() {
           </div>
         ) : (
           <div className="space-y-3 max-h-[62vh] overflow-y-auto pr-1">
-            {selectedPackRules.map((rule, idx) => (
+            {visibleNonWizardRules.map((rule, idx) => {
+              const canEdit = !!rule.db_id && (!rule.created_by || String(rule.created_by).toLowerCase() === currentUser);
+              return (
               <div key={`${rule._id || "rule"}-${idx}`} className="relative border rounded-lg overflow-hidden">
                 <div className="px-3 py-2 bg-gray-50 border-b flex items-center justify-between pr-10 gap-2">
                   <div className="text-sm font-medium text-gray-800 truncate">{rule._id || `Rule ${idx + 1}`}</div>
@@ -574,14 +631,16 @@ export default function RulePacks() {
                     {rule.category || "code"} | {rule._severity || "MAJOR"} | {Math.round((rule.confidence || 0) * 100)}%
                   </div>
                 </div>
-                <button
-                  onClick={() => setConfirmDeleteRuleId(rule.db_id || null)}
-                  className="absolute right-2 top-2 inline-flex items-center justify-center w-7 h-7 rounded bg-red-50 text-red-600 hover:bg-red-100"
-                  title="Delete rule"
-                  aria-label={`Delete rule ${rule._id || idx + 1}`}
-                >
-                  <X size={14} />
-                </button>
+                {canEdit ? (
+                  <button
+                    onClick={() => setConfirmDeleteRuleId(rule.db_id || null)}
+                    className="absolute right-2 top-2 inline-flex items-center justify-center w-7 h-7 rounded bg-red-50 text-red-600 hover:bg-red-100"
+                    title="Delete rule"
+                    aria-label={`Delete rule ${rule._id || idx + 1}`}
+                  >
+                    <X size={14} />
+                  </button>
+                ) : null}
                 <div className="px-3 py-2 bg-white border-b">
                   <button
                     onClick={() => toggleRuleExpanded(String(rule.db_id ?? idx))}
@@ -589,7 +648,7 @@ export default function RulePacks() {
                   >
                     {expandedRuleKeys.has(String(rule.db_id ?? idx)) ? "Hide YAML" : "Show YAML"}
                   </button>
-                  {rule.db_id ? (
+                  {canEdit ? (
                     <button
                       onClick={() => openEditYamlDialog(rule)}
                       className="ml-3 text-xs text-indigo-600 hover:text-indigo-800 inline-flex items-center gap-1"
@@ -605,7 +664,8 @@ export default function RulePacks() {
                   </pre>
                 )}
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </Modal>

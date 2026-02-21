@@ -4,10 +4,13 @@ from pydantic import BaseModel, Field
 
 from app.api.auth_context import get_request_user
 from app.services.store_service import (
+    clear_all_fixed_dashboard_violations,
     clear_dashboard_violations_by_date_range,
     create_dashboard_violation,
     delete_dashboard_violation,
     get_dashboard_overview,
+    get_managed_developers_for_architect,
+    get_show_shared_rules_enabled,
     list_dashboard_violations,
 )
 
@@ -20,7 +23,14 @@ def dashboard_overview(
     include_all_developers: bool = Query(default=True),
 ):
     user = get_request_user(request)
-    return get_dashboard_overview(created_by=None if include_all_developers else user)
+    shared_visible = get_show_shared_rules_enabled(default=True)
+    created_by_scope = None if shared_visible else user
+    managed_developers = get_managed_developers_for_architect(user)
+    if managed_developers:
+        return get_dashboard_overview(created_by=created_by_scope, developers=managed_developers)
+    return get_dashboard_overview(
+        created_by=created_by_scope if include_all_developers else user,
+    )
 
 
 @router.get("/dashboard/violations")
@@ -30,10 +40,14 @@ def dashboard_violations(
     include_all_developers: bool = Query(default=True),
 ):
     user = get_request_user(request)
+    shared_visible = get_show_shared_rules_enabled(default=True)
+    managed_developers = get_managed_developers_for_architect(user) if shared_visible else []
+    scoped_developer = None if managed_developers else (None if include_all_developers else user)
     return {
         "items": list_dashboard_violations(
             limit,
-            developer=None if include_all_developers else user,
+            developer=scoped_developer,
+            developers=managed_developers or None,
         )
     }
 
@@ -60,6 +74,12 @@ def create_dashboard_violation_route(payload: DashboardViolationIn, request: Req
     )
 
 
+@router.delete("/dashboard/violations/clear-fixed")
+def clear_fixed_dashboard_violations_route():
+    deleted = clear_all_fixed_dashboard_violations()
+    return {"deleted": deleted}
+
+
 @router.delete("/dashboard/violations/{violation_id}")
 def delete_dashboard_violation_route(violation_id: str):
     deleted = delete_dashboard_violation(violation_id)
@@ -78,3 +98,4 @@ def clear_dashboard_violations_route(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"deleted": deleted, "start_date": start_date, "end_date": end_date}
+

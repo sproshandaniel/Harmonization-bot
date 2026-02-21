@@ -145,6 +145,144 @@
   --hb-login-submit-hover: linear-gradient(95deg, #115e59 0%, #166534 100%);
 }
 
+:root[data-theme="graphite"] {
+  --hb-body-bg: #f4f5f8;
+  --hb-body-fg: #131722;
+  --hb-shell-bg: radial-gradient(1200px 680px at 15% -20%, #d9dee9 0%, #f4f5f8 45%, #eceff5 100%);
+
+  --hb-sidebar-from: #1f2532;
+  --hb-sidebar-via: #2b3345;
+  --hb-sidebar-to: #3a445b;
+  --hb-sidebar-border: rgba(196, 203, 219, 0.38);
+  --hb-sidebar-label: #d7deec;
+  --hb-sidebar-text: #eef2fa;
+  --hb-sidebar-footer: #dce3f0;
+
+  --hb-nav-hover-bg: rgba(196, 203, 219, 0.22);
+  --hb-nav-active-bg: rgba(167, 177, 197, 0.34);
+  --hb-nav-ring: rgba(217, 224, 236, 0.45);
+
+  --hb-header-bg: linear-gradient(92deg, #2a3244 0%, #3a4560 50%, #515e7c 100%);
+  --hb-header-border: rgba(196, 203, 219, 0.45);
+  --hb-header-text: #f3f6fc;
+  --hb-title: #f8faff;
+
+  --hb-logo-border: #cdd6e6;
+  --hb-control-bg: rgba(243, 246, 252, 0.14);
+  --hb-control-border: rgba(217, 224, 236, 0.35);
+  --hb-control-text: #f5f8ff;
+  --hb-control-hover: rgba(243, 246, 252, 0.28);
+  --hb-user-text: #e8edf9;
+  --hb-avatar-bg: #c4cbe0;
+  --hb-avatar-text: #1f2937;
+
+  --hb-login-overlay: linear-gradient(130deg, rgba(176, 186, 206, 0.22), rgba(203, 213, 230, 0.1));
+  --hb-login-card-bg: rgba(253, 253, 255, 0.84);
+  --hb-login-card-border: rgba(148, 163, 184, 0.4);
+  --hb-login-title: #1f2a3b;
+  --hb-login-subtitle: #46536a;
+  --hb-login-label: #334155;
+  --hb-login-input-bg: rgba(255, 255, 255, 0.94);
+  --hb-login-input-border: rgba(148, 163, 184, 0.55);
+  --hb-login-input-text: #111827;
+  --hb-login-input-placeholder: #64748b;
+  --hb-login-input-focus: rgba(100, 116, 139, 0.35);
+  --hb-login-submit-bg: linear-gradient(95deg, #334155 0%, #475569 100%);
+  --hb-login-submit-hover: linear-gradient(95deg, #1f2937 0%, #334155 100%);
+}
+
+:root[data-theme="citrus"] {
+  --hb-body-bg: #f8f9f1;
+  --hb-body-fg: #263016;
+  --hb-shell-bg: radial-gradient(1200px 700px at 10% -20%, #e9f2c8 0%, #f8f9f1 45%, #f1f5e4 100%);
+
+  --hb-sidebar-from: #355321;
+  --hb-sidebar-via: #4b6d2d;
+  --hb-sidebar-to: #64893a;
+  --hb-sidebar-border: rgba(220, 244, 188, 0.36);
+  --hb-sidebar-label: #e2f5c8;
+  --hb-sidebar-text: #f4ffe8;
+  --hb-sidebar-footer: #def6c3;
+
+  --hb-nav-hover-bg: rgba(217, 249, 157, 0.2);
+  --hb-nav-active-bg: rgba(190, 242, 100, 0.33);
+  --hb-nav-ring: rgba(220, 244, 188, 0.45);
+
+  --hb-header-bg: linear-gradient(92deg, #3d5d22 0%, #557b30 48%, #74a140 100%);
+  --hb-header-border: rgba(187, 247, 208, 0.35);
+  --hb-header-text: #f7ffe8;
+  --hb-title: #f9ffef;
+
+  --hb-logo-border: #d9f99d;
+  --hb-control-bg: rgba(249, 255, 234, 0.12);
+  --hb-control-border: rgba(217, 249, 157, 0.32);
+  --hb-control-text: #f7fee7;
+  --hb-control-hover: rgba(236, 252, 203, 0.25);
+  --hb-user-text: #f0fdda;
+  --hb-avatar-bg: #bef264;
+  --hb-avatar-text: #1a2e05;
+
+  --hb-login-overlay: linear-gradient(130deg, rgba(190, 242, 100, 0.2), rgba(217, 249, 157, 0.08));
+  --hb-login-card-bg: rgba(252, 255, 244, 0.84);
+  --hb-login-card-border: rgba(163, 230, 53, 0.45);
+  --hb-login-title: #365314;
+  --hb-login-subtitle: #4d6b2f;
+  --hb-login-label: #3f6212;
+  --hb-login-input-bg: rgba(255, 255, 255, 0.92);
+  --hb-login-input-border: rgba(163, 230, 53, 0.55);
+  --hb-login-input-text: #1f2c07;
+  --hb-login-input-placeholder: #6b7f45;
+  --hb-login-input-focus: rgba(132, 204, 22, 0.35);
+  --hb-login-submit-bg: linear-gradient(95deg, #4d7c0f 0%, #65a30d 100%);
+  --hb-login-submit-hover: linear-gradient(95deg, #3f6212 0%, #4d7c0f 100%);
+}
+
+:root[data-theme="ocean"] {
+  --hb-body-bg: #eef7fb;
+  --hb-body-fg: #0e2a3c;
+  --hb-shell-bg: radial-gradient(1200px 700px at 15% -15%, #cfeeff 0%, #eef7fb 45%, #e4f2fa 100%);
+
+  --hb-sidebar-from: #083f66;
+  --hb-sidebar-via: #0c5a8a;
+  --hb-sidebar-to: #1275ad;
+  --hb-sidebar-border: rgba(186, 230, 253, 0.35);
+  --hb-sidebar-label: #d7f1ff;
+  --hb-sidebar-text: #ebf8ff;
+  --hb-sidebar-footer: #d7efff;
+
+  --hb-nav-hover-bg: rgba(125, 211, 252, 0.2);
+  --hb-nav-active-bg: rgba(56, 189, 248, 0.33);
+  --hb-nav-ring: rgba(186, 230, 253, 0.45);
+
+  --hb-header-bg: linear-gradient(92deg, #0b4f7b 0%, #116a9f 50%, #1985c2 100%);
+  --hb-header-border: rgba(125, 211, 252, 0.4);
+  --hb-header-text: #eef9ff;
+  --hb-title: #f5fbff;
+
+  --hb-logo-border: #7dd3fc;
+  --hb-control-bg: rgba(240, 249, 255, 0.14);
+  --hb-control-border: rgba(186, 230, 253, 0.35);
+  --hb-control-text: #f0f9ff;
+  --hb-control-hover: rgba(224, 242, 254, 0.3);
+  --hb-user-text: #e5f5ff;
+  --hb-avatar-bg: #67e8f9;
+  --hb-avatar-text: #083344;
+
+  --hb-login-overlay: linear-gradient(130deg, rgba(103, 232, 249, 0.18), rgba(125, 211, 252, 0.1));
+  --hb-login-card-bg: rgba(245, 253, 255, 0.84);
+  --hb-login-card-border: rgba(56, 189, 248, 0.42);
+  --hb-login-title: #0c4a6e;
+  --hb-login-subtitle: #295673;
+  --hb-login-label: #075985;
+  --hb-login-input-bg: rgba(255, 255, 255, 0.93);
+  --hb-login-input-border: rgba(56, 189, 248, 0.5);
+  --hb-login-input-text: #082f49;
+  --hb-login-input-placeholder: #4a6d84;
+  --hb-login-input-focus: rgba(14, 165, 233, 0.35);
+  --hb-login-submit-bg: linear-gradient(95deg, #0284c7 0%, #0e7490 100%);
+  --hb-login-submit-hover: linear-gradient(95deg, #0369a1 0%, #155e75 100%);
+}
+
 html.dark {
   --hb-body-bg: #070f19;
   --hb-body-fg: #e7efff;
