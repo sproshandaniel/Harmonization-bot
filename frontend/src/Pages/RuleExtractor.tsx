@@ -82,7 +82,6 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
   const [wizardTotalSteps, setWizardTotalSteps] = useState<number>(3);
   const [wizardStepTitle, setWizardStepTitle] = useState<string>("");
   const [wizardStepDescription, setWizardStepDescription] = useState<string>("");
-  const [wizardStepSnippet, setWizardStepSnippet] = useState<string>("");
   const [wizardNextStepNo, setWizardNextStepNo] = useState<number>(1);
   const [maxRules, setMaxRules] = useState<number>(5);
   const [rulePackOptions, setRulePackOptions] = useState<string[]>([]);
@@ -279,7 +278,7 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
         form.append("wizard_step_no", String(derivedNextStepNo));
         form.append("wizard_step_title", wizardStepTitle.trim());
         form.append("wizard_step_description", wizardStepDescription.trim());
-        form.append("wizard_step_snippet", wizardStepSnippet);
+        form.append("wizard_step_snippet", "");
       }
       form.append("rule_pack", rulePack);
       form.append("created_by", createdBy);
@@ -324,7 +323,6 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
             setWizardNextStepNo(derivedNextStepNo + 1);
             setWizardStepTitle("");
             setWizardStepDescription("");
-            setWizardStepSnippet("");
           }
           return;
         }
@@ -464,7 +462,6 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
       setWizardTotalSteps(3);
       setWizardStepTitle("");
       setWizardStepDescription("");
-      setWizardStepSnippet("");
       setWizardNextStepNo(1);
     }
   }, [ruleType]);
@@ -670,13 +667,6 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
       wizard.step_no = stepNo;
       wizard.step_title = wizardStepTitle.trim();
       wizard.step_description = wizardStepDescription.trim();
-      if (wizardStepSnippet.trim()) {
-        const template =
-          typeof wizard.template === "object" && wizard.template ? wizard.template : {};
-        template.language = String(template.language || "ABAP").trim() || "ABAP";
-        template.snippet = wizardStepSnippet;
-        wizard.template = template;
-      }
       obj.wizard = wizard;
       if (!obj.title) obj.title = wizardStepTitle.trim();
       if (!obj.description) obj.description = wizardStepDescription.trim();
@@ -875,35 +865,24 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
                     <p className="mt-1 text-xs text-red-600">{formErrors.wizardStepTitle}</p>
                   )}
                 </div>
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-1">
-                    Step Description
-                  </label>
-                  <input
-                    className="border rounded w-full px-2 py-1 text-sm text-gray-700 focus:ring-2 focus:ring-indigo-500"
-                    value={wizardStepDescription}
-                    onChange={(e) => {
-                      setWizardStepDescription(e.target.value);
-                      setFormErrors((prev) => ({ ...prev, wizardStepDescription: "" }));
-                    }}
-                    placeholder="Short step description"
-                  />
-                  {formErrors.wizardStepDescription && (
-                    <p className="mt-1 text-xs text-red-600">{formErrors.wizardStepDescription}</p>
-                  )}
-                </div>
               </div>
               <div>
                 <label className="block text-sm font-semibold text-gray-700 mb-1">
-                  Step Suggested Code Snippet (Optional)
+                  Step Description
                 </label>
                 <textarea
-                  className="border rounded w-full px-2 py-1 text-sm font-mono text-gray-700 focus:ring-2 focus:ring-indigo-500"
-                  value={wizardStepSnippet}
-                  onChange={(e) => setWizardStepSnippet(e.target.value)}
-                  placeholder="Paste suggested code snippet for this step"
+                  className="border rounded w-full px-2 py-1 text-sm text-gray-700 focus:ring-2 focus:ring-indigo-500"
+                  value={wizardStepDescription}
+                  onChange={(e) => {
+                    setWizardStepDescription(e.target.value);
+                    setFormErrors((prev) => ({ ...prev, wizardStepDescription: "" }));
+                  }}
+                  placeholder="Describe what this step does"
                   rows={6}
                 />
+                {formErrors.wizardStepDescription && (
+                  <p className="mt-1 text-xs text-red-600">{formErrors.wizardStepDescription}</p>
+                )}
               </div>
               {formErrors.wizardTotalSteps && (
                 <p className="text-xs text-red-600">{formErrors.wizardTotalSteps}</p>
