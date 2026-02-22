@@ -404,11 +404,8 @@ body {
 
 .hb-logo-wrap {
   display: inline-flex;
-  border-radius: 0.4rem;
-  border: 1px solid var(--hb-logo-border);
-  background: var(--hb-logo-bg);
-  padding: 0.25rem;
-  box-shadow: 0 5px 18px rgba(15, 23, 42, 0.12);
+  align-items: center;
+  justify-content: center;
 }
 
 .hb-title {
@@ -510,10 +507,8 @@ body {
 .hb-login-logo {
   margin-bottom: 1rem;
   display: inline-flex;
-  border-radius: 0.5rem;
-  border: 1px solid var(--hb-logo-border);
-  background: var(--hb-logo-bg);
-  padding: 0.3rem;
+  align-items: center;
+  justify-content: center;
 }
 
 .hb-login-title {
@@ -746,3 +741,4 @@ html.dark .recharts-tooltip-item {
     padding: 0.8rem 1rem;
   }
 }
+

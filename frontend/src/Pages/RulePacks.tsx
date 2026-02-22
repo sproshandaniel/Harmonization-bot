@@ -14,6 +14,7 @@ import {
 import RuleExtractor from "./RuleExtractor";
 import Modal from "../Components/modal";
 import yaml from "js-yaml";
+import WizardFlowchart from "../Components/WizardFlowchart";
 
 type RulePack = {
   id: string;
@@ -33,6 +34,12 @@ type PackRule = {
   _severity?: string;
   status?: string;
   rule_pack?: string;
+};
+
+type WizardFlowStep = {
+  stepNo: number;
+  title: string;
+  dependsOn: number[];
 };
 
 export default function RulePacks() {
@@ -356,32 +363,62 @@ export default function RulePacks() {
         })
       : selectedPackRules;
 
-    const groups: Record<string, { name: string; steps: PackRule[]; deleteId: string }> = {};
+    const groups: Record<
+      string,
+      { name: string; steps: PackRule[]; deleteId: string; flowSteps: WizardFlowStep[] }
+    > = {};
     for (const rule of filteredRules) {
       if ((rule.category || "").toLowerCase() !== "wizard") continue;
       let wizardId = "";
       let wizardName = "Wizard";
+      let flowStep: WizardFlowStep | null = null;
       try {
         const parsed: any = yaml.load(rule.yaml);
         const wizard = parsed?.wizard || {};
         wizardId = String(wizard.wizard_id || "");
         wizardName = String(wizard.wizard_name || wizardName);
+        const stepNo = Number(wizard.step_no);
+        const dependsRaw = Array.isArray(wizard.depends_on) ? wizard.depends_on : [];
+        const dependsOn = dependsRaw
+          .map((x: unknown) => Number(x))
+          .filter((x: number) => Number.isFinite(x) && x >= 1);
+        if (Number.isFinite(stepNo) && stepNo >= 1) {
+          flowStep = {
+            stepNo,
+            title: String(wizard.step_title || parsed?.title || `Step ${stepNo}`).trim(),
+            dependsOn,
+          };
+        }
       } catch {
         // ignore parse errors and fall back to defaults
       }
       const fallbackId = String(rule._id || wizardName || "wizard");
       const groupId = wizardId || fallbackId;
       if (!groups[groupId]) {
-        groups[groupId] = { name: wizardName, steps: [], deleteId: wizardId || fallbackId };
+        groups[groupId] = {
+          name: wizardName,
+          steps: [],
+          deleteId: wizardId || fallbackId,
+          flowSteps: [],
+        };
       }
       groups[groupId].steps.push(rule);
+      if (flowStep) {
+        const existingIdx = groups[groupId].flowSteps.findIndex((s) => s.stepNo === flowStep!.stepNo);
+        if (existingIdx >= 0) groups[groupId].flowSteps[existingIdx] = flowStep;
+        else groups[groupId].flowSteps.push(flowStep);
+      }
     }
-    return Object.entries(groups).map(([id, data]) => ({
-      id,
-      name: data.name,
-      steps: data.steps,
-      deleteId: data.deleteId,
-    }));
+    return Object.entries(groups).map(([id, data]) => {
+      const sortedSteps = [...data.flowSteps].sort((a, b) => a.stepNo - b.stepNo);
+      return {
+        id,
+        name: data.name,
+        steps: data.steps,
+        deleteId: data.deleteId,
+        flowSteps: sortedSteps,
+      };
+    });
   }, [selectedPackRules, ruleSearch]);
 
   const visibleNonWizardRules = useMemo(() => {
@@ -570,6 +607,15 @@ export default function RulePacks() {
                   </div>
                   {isOpen && (
                     <div className="space-y-3 p-3 bg-white">
+                      {wizard.flowSteps.length > 0 && (
+                        <div className="rounded border border-indigo-200 bg-indigo-50 px-3 py-2 space-y-2">
+                          <div className="text-xs font-semibold text-indigo-800">Workflow Chart</div>
+                          <div className="text-[11px] text-indigo-700">
+                            Solid arrows are sequence; dotted arrows are dependencies.
+                          </div>
+                          <WizardFlowchart steps={wizard.flowSteps} className="bg-white border-indigo-200" />
+                        </div>
+                      )}
                       {wizard.steps.map((rule, idx) => (
                         (() => {
                           const canEdit = !!rule.db_id && (!rule.created_by || String(rule.created_by).toLowerCase() === currentUser);

@@ -16,7 +16,12 @@ import yaml
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from app.services.store_service import get_ai_model_name, get_model_api_key, log_llm_usage_event
+from app.services.store_service import (
+    get_ai_model_name,
+    get_duplicate_similarity_threshold,
+    get_model_api_key,
+    log_llm_usage_event,
+)
 from app.services.vector_store_service import find_duplicate_rule, upsert_rule_vector
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -567,6 +572,7 @@ def _build_prompt(
     wizard_description: str | None = None,
     wizard_step_title: str | None = None,
     wizard_step_description: str | None = None,
+    wizard_step_snippet: str | None = None,
     wizard_step_no: int | None = None,
     wizard_total_steps: int | None = None,
 ) -> str:
@@ -586,6 +592,8 @@ def _build_prompt(
             base += f"\n\nStep Title:\n{wizard_step_title.strip()}"
         if wizard_step_description and wizard_step_description.strip():
             base += f"\n\nStep Description:\n{wizard_step_description.strip()}"
+        if wizard_step_snippet and wizard_step_snippet.strip():
+            base += f"\n\nStep Suggested Code Snippet:\n{wizard_step_snippet.strip()}"
     else:
         base = EXTRACTION_PROMPT.format(rule_type=normalized, max_rules=max_rules)
         if normalized == "code":
@@ -689,6 +697,7 @@ def _coerce_rule(
     wizard_description: str | None = None,
     wizard_step_title: str | None = None,
     wizard_step_description: str | None = None,
+    wizard_step_snippet: str | None = None,
     wizard_step_no: int | None = None,
     wizard_total_steps: int | None = None,
     raw_text: str | None = None,
@@ -776,6 +785,8 @@ def _coerce_rule(
         if not isinstance(template_block, dict):
             template_block = {}
         snippet = str(template_block.get("snippet") or rule_obj.get("template_snippet") or "").strip()
+        if wizard_step_snippet and wizard_step_snippet.strip():
+            snippet = wizard_step_snippet
         if not snippet:
             snippet = "CLASS zcl_wizard_step IMPLEMENTATION.\nENDCLASS."
 
@@ -967,6 +978,7 @@ def _extract_rule_objects(
     wizard_description: str | None = None,
     wizard_step_title: str | None = None,
     wizard_step_description: str | None = None,
+    wizard_step_snippet: str | None = None,
     wizard_step_no: int | None = None,
     wizard_total_steps: int | None = None,
     raw_text: str | None = None,
@@ -1002,6 +1014,7 @@ def _extract_rule_objects(
             wizard_description=wizard_description,
             wizard_step_title=wizard_step_title,
             wizard_step_description=wizard_step_description,
+            wizard_step_snippet=wizard_step_snippet,
             wizard_step_no=wizard_step_no,
             wizard_total_steps=wizard_total_steps,
             raw_text=raw_text,
@@ -1157,6 +1170,7 @@ async def extract_rules_pipeline(
     wizard_description: str | None = None,
     wizard_step_title: str | None = None,
     wizard_step_description: str | None = None,
+    wizard_step_snippet: str | None = None,
     wizard_step_no: int | None = None,
     wizard_total_steps: int | None = None,
     template_use_ai: bool = False,
@@ -1176,6 +1190,7 @@ async def extract_rules_pipeline(
         wizard_description=wizard_description,
         wizard_step_title=wizard_step_title,
         wizard_step_description=wizard_step_description,
+        wizard_step_snippet=wizard_step_snippet,
         wizard_step_no=wizard_step_no,
         wizard_total_steps=wizard_total_steps,
     )
@@ -1227,6 +1242,7 @@ confidence: 0.2
             wizard_description=wizard_description,
             wizard_step_title=wizard_step_title,
             wizard_step_description=wizard_step_description,
+            wizard_step_snippet=wizard_step_snippet,
             wizard_step_no=wizard_step_no,
             wizard_total_steps=wizard_total_steps,
             raw_text=raw_text,
@@ -1262,6 +1278,7 @@ confidence: 0.3
             ]
 
         results: list[dict[str, Any]] = []
+        duplicate_threshold = get_duplicate_similarity_threshold(default=0.9)
         for idx, rule_obj in enumerate(rule_objects, start=1):
             # Hard-enforce typing/shape for wizard/template extractions.
             if normalized_rule_type in {"wizard", "template"}:
@@ -1273,6 +1290,7 @@ confidence: 0.3
                     wizard_description=wizard_description,
                     wizard_step_title=wizard_step_title,
                     wizard_step_description=wizard_step_description,
+                    wizard_step_snippet=wizard_step_snippet,
                     wizard_step_no=wizard_step_no,
                     wizard_total_steps=wizard_total_steps,
                     raw_text=raw_text,
@@ -1295,9 +1313,12 @@ confidence: 0.3
                     input_tokens=emb_in if emb_in > 0 else emb_total,
                     output_tokens=emb_out,
                     total_tokens=emb_total,
-                    metadata={"rule_type": normalized_rule_type},
+                    metadata={
+                        "rule_type": normalized_rule_type,
+                        "duplicate_threshold": duplicate_threshold,
+                    },
                 )
-            duplicate_id, similarity = find_duplicate_rule(embedding, threshold=0.88)
+            duplicate_id, similarity = find_duplicate_rule(embedding, threshold=duplicate_threshold)
             new_id = str(rule_obj.get("id") or f"rule.{abs(hash(rule_yaml)) % (10**10)}")
             upsert_rule_vector(
                 rule_id=new_id,
@@ -1360,6 +1381,7 @@ async def extract_rules_multi_pipeline(
     wizard_description: str | None = None,
     wizard_step_title: str | None = None,
     wizard_step_description: str | None = None,
+    wizard_step_snippet: str | None = None,
     wizard_step_no: int | None = None,
     wizard_total_steps: int | None = None,
     template_use_ai: bool = False,
@@ -1377,6 +1399,7 @@ async def extract_rules_multi_pipeline(
             wizard_description=wizard_description,
             wizard_step_title=wizard_step_title,
             wizard_step_description=wizard_step_description,
+            wizard_step_snippet=wizard_step_snippet,
             wizard_step_no=wizard_step_no,
             wizard_total_steps=wizard_total_steps,
             template_use_ai=template_use_ai,
@@ -1400,6 +1423,7 @@ async def extract_rules_multi_pipeline(
             wizard_description=wizard_description if current_type == "wizard" else None,
             wizard_step_title=wizard_step_title if current_type == "wizard" else None,
             wizard_step_description=wizard_step_description if current_type == "wizard" else None,
+            wizard_step_snippet=wizard_step_snippet if current_type == "wizard" else None,
             wizard_step_no=wizard_step_no if current_type == "wizard" else None,
             wizard_total_steps=wizard_total_steps if current_type == "wizard" else None,
             template_use_ai=template_use_ai if current_type == "template" else False,

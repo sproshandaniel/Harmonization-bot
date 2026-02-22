@@ -9,14 +9,22 @@ import yaml
 from dotenv import load_dotenv
 
 from app.services.store_service import (
+    add_wizard_session_event,
     create_dashboard_violation,
+    get_active_wizard_session,
     log_llm_usage_event,
     get_ai_llm_fallback_enabled,
     get_ai_model_name,
     get_model_api_key,
     get_rules_for_pack,
     get_rules_for_project,
+    get_wizard_session,
+    get_wizard_steps,
     list_rule_packs,
+    list_wizard_session_events,
+    list_wizards,
+    start_wizard_session,
+    update_wizard_session,
 )
 from app.services.vector_store_service import search_rule_vectors
 
@@ -802,6 +810,434 @@ def _log_violations_to_dashboard(
     return count
 
 
+def _wizard_step_card(step: dict[str, Any], total_steps: int) -> str:
+    step_no = int(step.get("step_no") or 1)
+    title = str(step.get("title") or f"Step {step_no}").strip()
+    description = str(step.get("description") or "").strip()
+    snippet = str(step.get("snippet") or "").strip()
+    object_type = str(step.get("object_type") or "").strip()
+    depends = step.get("depends_on") if isinstance(step.get("depends_on"), list) else []
+
+    lines: list[str] = [f"Step {step_no}/{max(1, int(total_steps or 1))}: {title}"]
+    if object_type:
+        lines.append(f"Object type: {object_type}")
+    if description:
+        lines.append(f"What to do: {description}")
+    if depends:
+        lines.append(f"Depends on steps: {', '.join(str(x) for x in depends)}")
+    if snippet:
+        lines.append("Suggested ABAP snippet:")
+        lines.append(snippet)
+    lines.append("Reply 'done' after activation to continue to the next step.")
+    return "\n".join(lines)
+
+
+def _is_done_signal(query: str) -> bool:
+    q = (query or "").strip().lower()
+    if q in {"done", "completed", "next", "continue", "ok done", "done.", "activated"}:
+        return True
+    return bool(re.search(r"\b(done|completed|activated|next step|proceed)\b", q))
+
+
+def _is_status_signal(query: str) -> bool:
+    q = (query or "").strip().lower()
+    return bool(re.search(r"\b(status|progress|where are we|current step|what next)\b", q))
+
+
+def _wizard_candidate_score(query: str, wizard: dict[str, Any]) -> float:
+    q_tokens = _tokenize(query or "")
+    haystack = " ".join(
+        [
+            str(wizard.get("name") or ""),
+            str(wizard.get("description") or ""),
+            str(wizard.get("rule_pack") or ""),
+        ]
+    ).lower()
+    h_tokens = _tokenize(haystack)
+    score = float(len(q_tokens & h_tokens))
+    if str(wizard.get("name") or "").lower() in (query or "").lower():
+        score += 3.0
+    if "rap" in (query or "").lower() and "rap" in haystack:
+        score += 4.0
+    if "wizard" in (query or "").lower():
+        score += 1.0
+    return score
+
+
+def _find_best_wizard_for_query(
+    query: str,
+    created_by: str | None,
+    project_id: str | None,
+) -> dict[str, Any] | None:
+    own = list_wizards(created_by=created_by, project_id=project_id, q=None)
+    shared = list_wizards(created_by=None, project_id=project_id, q=None)
+
+    merged: dict[str, dict[str, Any]] = {}
+    for item in own + shared:
+        wid = str(item.get("id") or "").strip()
+        if wid and wid not in merged:
+            merged[wid] = item
+    if not merged:
+        return None
+
+    scored = sorted(
+        [(_wizard_candidate_score(query, w), w) for w in merged.values()],
+        key=lambda x: x[0],
+        reverse=True,
+    )
+    best_score, best = scored[0]
+    if best_score <= 0 and "wizard" not in (query or "").lower():
+        return None
+    return best
+
+
+def _build_wizard_response(
+    session: dict[str, Any],
+    wizard: dict[str, Any],
+    step: dict[str, Any] | None,
+    message: str,
+    events: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    steps = get_wizard_steps(str(wizard.get("id") or ""), created_by=None)
+    current_step = int(session.get("current_step") or 1)
+    is_completed = str(session.get("status") or "").lower() == "completed"
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+
+    ordered_steps = sorted(steps, key=lambda s: int(s.get("step_no") or 0))
+    for idx, wizard_step in enumerate(ordered_steps):
+        step_no = int(wizard_step.get("step_no") or 0)
+        node_id = f"s{step_no}"
+        state = "pending"
+        if is_completed or step_no < current_step:
+            state = "completed"
+        elif step_no == current_step and not is_completed:
+            state = "current"
+        nodes.append(
+            {
+                "id": node_id,
+                "step_no": step_no,
+                "label": str(wizard_step.get("title") or f"Step {step_no}"),
+                "state": state,
+            }
+        )
+        if idx > 0:
+            prev_no = int(ordered_steps[idx - 1].get("step_no") or 0)
+            edges.append({"from": f"s{prev_no}", "to": node_id})
+
+    mermaid_lines = ["flowchart TD"]
+    for node in nodes:
+        mermaid_lines.append(f"  {node['id']}[{node['step_no']}. {node['label']}]")
+    for edge in edges:
+        mermaid_lines.append(f"  {edge['from']} --> {edge['to']}")
+    if nodes:
+        completed_ids = [n["id"] for n in nodes if n["state"] == "completed"]
+        current_ids = [n["id"] for n in nodes if n["state"] == "current"]
+        pending_ids = [n["id"] for n in nodes if n["state"] == "pending"]
+        if completed_ids:
+            mermaid_lines.append(f"  class {','.join(completed_ids)} completed")
+        if current_ids:
+            mermaid_lines.append(f"  class {','.join(current_ids)} current")
+        if pending_ids:
+            mermaid_lines.append(f"  class {','.join(pending_ids)} pending")
+        mermaid_lines.append("  classDef completed fill:#dcfce7,stroke:#16a34a,color:#166534")
+        mermaid_lines.append("  classDef current fill:#dbeafe,stroke:#2563eb,color:#1e3a8a")
+        mermaid_lines.append("  classDef pending fill:#f3f4f6,stroke:#9ca3af,color:#374151")
+
+    return {
+        "message": message,
+        "wizard_session": {
+            "session_id": session.get("id"),
+            "wizard_id": wizard.get("id"),
+            "wizard_name": wizard.get("name"),
+            "project_id": session.get("project_id"),
+            "current_step": session.get("current_step"),
+            "status": session.get("status"),
+            "total_steps": wizard.get("total_steps"),
+        },
+        "wizard_step": step,
+        "wizard_flowchart": {
+            "nodes": nodes,
+            "edges": edges,
+            "mermaid": "\n".join(mermaid_lines),
+        },
+        "events": events or [],
+        "violations": [],
+        "violations_logged": 0,
+        "suggestions": {"templates": [], "wizards": []},
+        "llm_fallback": {
+            "enabled": False,
+            "requires_confirmation": False,
+            "used": False,
+            "answer": None,
+        },
+        "retrieved": [],
+    }
+
+
+def start_wizard_conversation(
+    query: str,
+    developer: str,
+    created_by: str | None = None,
+    project_id: str | None = None,
+    wizard_id: str | None = None,
+) -> dict[str, Any]:
+    wizard: dict[str, Any] | None = None
+    if wizard_id:
+        all_candidates = list_wizards(created_by=None, project_id=project_id, q=None)
+        wizard = next((w for w in all_candidates if str(w.get("id")) == str(wizard_id)), None)
+    if wizard is None:
+        wizard = _find_best_wizard_for_query(query=query, created_by=created_by, project_id=project_id)
+    if wizard is None:
+        return {
+            "message": "No matching wizard found. Ask an architect to save a relevant step-by-step wizard.",
+            "wizard_session": None,
+            "wizard_step": None,
+            "events": [],
+            "violations": [],
+            "violations_logged": 0,
+            "suggestions": {"templates": [], "wizards": []},
+            "llm_fallback": {
+                "enabled": False,
+                "requires_confirmation": False,
+                "used": False,
+                "answer": None,
+            },
+            "retrieved": [],
+        }
+
+    active = get_active_wizard_session(developer=developer, project_id=project_id)
+    if active and str(active.get("wizard_id")) == str(wizard.get("id")):
+        steps = get_wizard_steps(str(wizard.get("id")), created_by=None)
+        curr = int(active.get("current_step") or 1)
+        step = next((s for s in steps if int(s.get("step_no") or 0) == curr), None)
+        events = list_wizard_session_events(str(active.get("id")), limit=20)
+        message = _wizard_step_card(step, int(wizard.get("total_steps") or len(steps) or 1)) if step else "Wizard session resumed."
+        update_wizard_session(str(active.get("id")), last_bot_message=message)
+        return _build_wizard_response(active, wizard, step, message, events)
+
+    session = start_wizard_session(
+        wizard_id=str(wizard.get("id")),
+        developer=developer,
+        project_id=project_id,
+    )
+    steps = get_wizard_steps(str(wizard.get("id")), created_by=None)
+    step = next((s for s in steps if int(s.get("step_no") or 0) == 1), None)
+    message = _wizard_step_card(step, int(wizard.get("total_steps") or len(steps) or 1)) if step else "Wizard started, but no steps were found."
+    add_wizard_session_event(str(session.get("id")), sender="bot", event_type="wizard_started", step_no=1, message=message)
+    update_wizard_session(str(session.get("id")), current_step=1, status="active", last_bot_message=message)
+    events = list_wizard_session_events(str(session.get("id")), limit=20)
+    session = get_wizard_session(str(session.get("id")), developer=developer) or session
+    return _build_wizard_response(session, wizard, step, message, events)
+
+
+def advance_wizard_conversation(
+    session_id: str,
+    developer: str,
+    user_message: str = "",
+) -> dict[str, Any]:
+    session = get_wizard_session(session_id=session_id, developer=developer)
+    if session is None:
+        return {
+            "message": "Wizard session not found.",
+            "wizard_session": None,
+            "wizard_step": None,
+            "events": [],
+            "violations": [],
+            "violations_logged": 0,
+            "suggestions": {"templates": [], "wizards": []},
+            "llm_fallback": {
+                "enabled": False,
+                "requires_confirmation": False,
+                "used": False,
+                "answer": None,
+            },
+            "retrieved": [],
+        }
+
+    if str(session.get("status") or "").lower() != "active":
+        wizard_done = next(
+            (w for w in list_wizards(created_by=None, project_id=session.get("project_id")) if str(w.get("id")) == str(session.get("wizard_id"))),
+            None,
+        )
+        return _build_wizard_response(
+            session,
+            wizard_done or {"id": session.get("wizard_id"), "name": "Wizard", "total_steps": session.get("current_step")},
+            None,
+            "This wizard session is already completed.",
+            list_wizard_session_events(str(session.get("id")), limit=20),
+        )
+
+    wizard = next(
+        (w for w in list_wizards(created_by=None, project_id=session.get("project_id")) if str(w.get("id")) == str(session.get("wizard_id"))),
+        None,
+    )
+    if wizard is None:
+        return _build_wizard_response(session, {"id": session.get("wizard_id"), "name": "Wizard", "total_steps": 0}, None, "Wizard definition not found.")
+
+    if user_message.strip():
+        add_wizard_session_event(
+            str(session.get("id")),
+            sender="developer",
+            event_type="user_reply",
+            step_no=int(session.get("current_step") or 1),
+            message=user_message.strip(),
+        )
+
+    steps = get_wizard_steps(str(wizard.get("id")), created_by=None)
+    total_steps = int(wizard.get("total_steps") or len(steps) or 1)
+    current_step_no = int(session.get("current_step") or 1)
+    current_step = next((s for s in steps if int(s.get("step_no") or 0) == current_step_no), None)
+
+    if not _is_done_signal(user_message):
+        message = _wizard_step_card(current_step, total_steps) if current_step else "Current step not found."
+        update_wizard_session(str(session.get("id")), last_bot_message=message)
+        add_wizard_session_event(
+            str(session.get("id")),
+            sender="bot",
+            event_type="wizard_prompt_repeat",
+            step_no=current_step_no,
+            message=message,
+        )
+        session = get_wizard_session(str(session.get("id")), developer=developer) or session
+        return _build_wizard_response(
+            session,
+            wizard,
+            current_step,
+            message,
+            list_wizard_session_events(str(session.get("id")), limit=20),
+        )
+
+    next_step_no = current_step_no + 1
+    next_step = next((s for s in steps if int(s.get("step_no") or 0) == next_step_no), None)
+
+    if next_step is None:
+        completion_message = "Great. You completed all wizard steps. Wizard flow is finished."
+        update_wizard_session(
+            str(session.get("id")),
+            current_step=current_step_no,
+            status="completed",
+            last_bot_message=completion_message,
+        )
+        add_wizard_session_event(
+            str(session.get("id")),
+            sender="bot",
+            event_type="wizard_completed",
+            step_no=current_step_no,
+            message=completion_message,
+        )
+        session = get_wizard_session(str(session.get("id")), developer=developer) or session
+        return _build_wizard_response(
+            session,
+            wizard,
+            None,
+            completion_message,
+            list_wizard_session_events(str(session.get("id")), limit=20),
+        )
+
+    next_message = _wizard_step_card(next_step, total_steps)
+    update_wizard_session(
+        str(session.get("id")),
+        current_step=next_step_no,
+        status="active",
+        last_bot_message=next_message,
+    )
+    add_wizard_session_event(
+        str(session.get("id")),
+        sender="bot",
+        event_type="wizard_advanced",
+        step_no=next_step_no,
+        message=next_message,
+    )
+    session = get_wizard_session(str(session.get("id")), developer=developer) or session
+    return _build_wizard_response(
+        session,
+        wizard,
+        next_step,
+        next_message,
+        list_wizard_session_events(str(session.get("id")), limit=20),
+    )
+
+
+def get_wizard_conversation_status(
+    developer: str,
+    project_id: str | None = None,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    session = (
+        get_wizard_session(session_id=session_id, developer=developer)
+        if session_id
+        else get_active_wizard_session(developer=developer, project_id=project_id)
+    )
+    if session is None:
+        return {
+            "message": "No active wizard session.",
+            "wizard_session": None,
+            "wizard_step": None,
+            "events": [],
+            "violations": [],
+            "violations_logged": 0,
+            "suggestions": {"templates": [], "wizards": []},
+            "llm_fallback": {
+                "enabled": False,
+                "requires_confirmation": False,
+                "used": False,
+                "answer": None,
+            },
+            "retrieved": [],
+        }
+
+    wizard = next(
+        (w for w in list_wizards(created_by=None, project_id=session.get("project_id")) if str(w.get("id")) == str(session.get("wizard_id"))),
+        None,
+    ) or {"id": session.get("wizard_id"), "name": "Wizard", "total_steps": session.get("current_step")}
+    steps = get_wizard_steps(str(session.get("wizard_id")), created_by=None)
+    current_step = next((s for s in steps if int(s.get("step_no") or 0) == int(session.get("current_step") or 1)), None)
+    message = str(session.get("last_bot_message") or "").strip()
+    if not message:
+        message = _wizard_step_card(current_step, int(wizard.get("total_steps") or len(steps) or 1)) if current_step else "Wizard session loaded."
+    return _build_wizard_response(
+        session,
+        wizard,
+        current_step,
+        message,
+        list_wizard_session_events(str(session.get("id")), limit=20),
+    )
+
+
+def _maybe_handle_wizard_assist(
+    query: str,
+    developer: str,
+    created_by: str | None,
+    project_id: str | None,
+) -> dict[str, Any] | None:
+    q = (query or "").strip()
+    q_low = q.lower()
+    active = get_active_wizard_session(developer=developer, project_id=project_id)
+    if active:
+        if _is_done_signal(q_low):
+            return advance_wizard_conversation(session_id=str(active.get("id")), developer=developer, user_message=q)
+        if _is_status_signal(q_low):
+            return get_wizard_conversation_status(developer=developer, project_id=project_id, session_id=str(active.get("id")))
+        current = get_wizard_conversation_status(developer=developer, project_id=project_id, session_id=str(active.get("id")))
+        current["message"] = (
+            f"You are in an active wizard session. {current.get('message')}\n"
+            "Reply 'done' after you complete and activate this step."
+        )
+        return current
+
+    wants_wizard = (
+        "wizard" in q_low
+        or "rap" in q_low
+        or "step by step" in q_low
+        or "guide me" in q_low
+        or ("steps" in q_low and "application" in q_low)
+    )
+    if not wants_wizard:
+        return None
+    return start_wizard_conversation(query=q, developer=developer, created_by=created_by, project_id=project_id)
+
+
 def assist_with_rules(
     query: str,
     code: str = "",
@@ -815,6 +1251,15 @@ def assist_with_rules(
     log_violations: bool = True,
     llm_fallback_confirmed: bool = False,
 ) -> dict[str, Any]:
+    wizard_response = _maybe_handle_wizard_assist(
+        query=query,
+        developer=developer,
+        created_by=created_by,
+        project_id=project_id,
+    )
+    if wizard_response is not None:
+        return wizard_response
+
     rule_rows = _load_rule_rows(project_id=project_id, pack_name=pack_name, created_by=created_by)
     resolved = [rule for row in rule_rows if (rule := _resolve_rule(row)) is not None]
     is_validate = _is_validation_query(query)

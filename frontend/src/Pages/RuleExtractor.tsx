@@ -11,6 +11,7 @@ import {
 import Modal from "../Components/modal";
 import Editor from "@monaco-editor/react";
 import yaml from "js-yaml";
+import WizardFlowchart from "../Components/WizardFlowchart";
 
 function LoadingOverlay() {
   return (
@@ -33,7 +34,7 @@ type RuleResult = {
   duplicate_of?: string | null;
   similarity?: number | null;
   source_snippet?: string;
-  status?: "new" | "approved" | "edited" | "discarded" | "saved";
+  status?: "new" | "approved" | "edited" | "discarded" | "saved" | "merged";
   _severity?: string;
   _id?: string;
 };
@@ -61,6 +62,12 @@ type RuleExtractorProps = {
 
 const MULTI_EXTRACT_TYPES = ["code", "design", "template"] as const;
 
+type WizardFlowStep = {
+  stepNo: number;
+  title: string;
+  dependsOn: number[];
+};
+
 export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
   const [text, setText] = useState("");
   const [file, setFile] = useState<File | null>(null);
@@ -75,6 +82,7 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
   const [wizardTotalSteps, setWizardTotalSteps] = useState<number>(3);
   const [wizardStepTitle, setWizardStepTitle] = useState<string>("");
   const [wizardStepDescription, setWizardStepDescription] = useState<string>("");
+  const [wizardStepSnippet, setWizardStepSnippet] = useState<string>("");
   const [wizardNextStepNo, setWizardNextStepNo] = useState<number>(1);
   const [maxRules, setMaxRules] = useState<number>(5);
   const [rulePackOptions, setRulePackOptions] = useState<string[]>([]);
@@ -83,6 +91,7 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
   const [extractError, setExtractError] = useState<string | null>(null);
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
   const [wizardSaveError, setWizardSaveError] = useState<string | null>(null);
+  const [savingWizard, setSavingWizard] = useState(false);
 
   // Projects (initialized with demo values)
   const [projects, setProjects] = useState<Project[]>([]);
@@ -112,7 +121,7 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
       const matchesQuery = filter.q
         ? r.yaml.toLowerCase().includes(filter.q.toLowerCase())
         : true;
-      return matchesCat && matchesQuery && r.status !== "discarded";
+      return matchesCat && matchesQuery && r.status !== "discarded" && r.status !== "merged";
       });
   }, [results, filter]);
 
@@ -121,6 +130,36 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
     [projects, selectedProjectId]
   );
   const hasSourceInput = inputSource === "text" ? !!text.trim() : !!file;
+  const activeWizardRules = useMemo(
+    () => results.filter((r) => r.category === "wizard" && r.status !== "discarded"),
+    [results]
+  );
+  const wizardFlowSteps = useMemo<WizardFlowStep[]>(() => {
+    const parsedSteps: WizardFlowStep[] = [];
+    for (const rule of activeWizardRules) {
+      try {
+        const parsed: any = yaml.load(rule.yaml);
+        const wizard = parsed?.wizard || {};
+        const stepNo = Number(wizard?.step_no);
+        if (!Number.isFinite(stepNo) || stepNo < 1) continue;
+        const title = String(wizard?.step_title || parsed?.title || `Step ${stepNo}`).trim();
+        const dependsRaw = Array.isArray(wizard?.depends_on) ? wizard.depends_on : [];
+        const dependsOn = dependsRaw
+          .map((x: unknown) => Number(x))
+          .filter((x: number) => Number.isFinite(x) && x >= 1);
+        parsedSteps.push({ stepNo, title, dependsOn });
+      } catch {
+        // ignore malformed YAML entries in flow derivation
+      }
+    }
+
+    const byStep = new Map<number, WizardFlowStep>();
+    for (const step of parsedSteps) {
+      byStep.set(step.stepNo, step);
+    }
+    return Array.from(byStep.values()).sort((a, b) => a.stepNo - b.stepNo);
+  }, [activeWizardRules]);
+  const wizardFlowReady = ruleType === "wizard" && wizardFlowSteps.length >= wizardTotalSteps;
 
   function showNotice(message: string) {
     setNoticeMessage(message);
@@ -240,6 +279,7 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
         form.append("wizard_step_no", String(derivedNextStepNo));
         form.append("wizard_step_title", wizardStepTitle.trim());
         form.append("wizard_step_description", wizardStepDescription.trim());
+        form.append("wizard_step_snippet", wizardStepSnippet);
       }
       form.append("rule_pack", rulePack);
       form.append("created_by", createdBy);
@@ -284,6 +324,7 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
             setWizardNextStepNo(derivedNextStepNo + 1);
             setWizardStepTitle("");
             setWizardStepDescription("");
+            setWizardStepSnippet("");
           }
           return;
         }
@@ -308,6 +349,19 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
     setResults((prev) =>
       prev.map((r, i) => (i === idx ? { ...r, status: "discarded" } : r))
     );
+  }
+
+  function keepDuplicateRule(idx: number) {
+    setResults((prev) =>
+      prev.map((r, i) => (i === idx ? { ...r, status: "approved" } : r))
+    );
+  }
+
+  function mergeDuplicateRule(idx: number) {
+    setResults((prev) =>
+      prev.map((r, i) => (i === idx ? { ...r, status: "merged" } : r))
+    );
+    showNotice("Merged duplicate candidate into existing rule and removed it from pending list.");
   }
 
   function openEditor(idx: number) {
@@ -410,6 +464,7 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
       setWizardTotalSteps(3);
       setWizardStepTitle("");
       setWizardStepDescription("");
+      setWizardStepSnippet("");
       setWizardNextStepNo(1);
     }
   }, [ruleType]);
@@ -446,17 +501,19 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
   }
 
   async function saveWizard() {
+    if (savingWizard) return;
     const nextErrors: Record<string, string> = {};
     if (!selectedProjectId) nextErrors.project = "Please select a project.";
     if (!wizardName.trim()) nextErrors.wizardName = "Please enter a wizard name.";
     if (!wizardDescription.trim()) nextErrors.wizardDescription = "Please enter a wizard description.";
     if (wizardTotalSteps < 1) nextErrors.wizardTotalSteps = "Please enter a total step count (min 1).";
 
-    const wizardSteps = results.filter(
-      (r) => r.category === "wizard" && r.status !== "discarded"
-    );
+    const wizardSteps = activeWizardRules;
     if (wizardSteps.length === 0) {
       nextErrors.wizardSteps = "Extract at least one wizard step before saving.";
+    }
+    if (wizardSteps.length < wizardTotalSteps) {
+      nextErrors.wizardSteps = `Extract all ${wizardTotalSteps} steps before saving the wizard.`;
     }
 
     if (Object.keys(nextErrors).length > 0) {
@@ -465,6 +522,7 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
     }
 
     try {
+      setSavingWizard(true);
       setWizardSaveError(null);
       const res = await fetch("/api/wizards", {
         method: "POST",
@@ -497,6 +555,8 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Save failed";
       setWizardSaveError(message);
+    } finally {
+      setSavingWizard(false);
     }
   }
 
@@ -610,6 +670,13 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
       wizard.step_no = stepNo;
       wizard.step_title = wizardStepTitle.trim();
       wizard.step_description = wizardStepDescription.trim();
+      if (wizardStepSnippet.trim()) {
+        const template =
+          typeof wizard.template === "object" && wizard.template ? wizard.template : {};
+        template.language = String(template.language || "ABAP").trim() || "ABAP";
+        template.snippet = wizardStepSnippet;
+        wizard.template = template;
+      }
       obj.wizard = wizard;
       if (!obj.title) obj.title = wizardStepTitle.trim();
       if (!obj.description) obj.description = wizardStepDescription.trim();
@@ -826,6 +893,18 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
                   )}
                 </div>
               </div>
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">
+                  Step Suggested Code Snippet (Optional)
+                </label>
+                <textarea
+                  className="border rounded w-full px-2 py-1 text-sm font-mono text-gray-700 focus:ring-2 focus:ring-indigo-500"
+                  value={wizardStepSnippet}
+                  onChange={(e) => setWizardStepSnippet(e.target.value)}
+                  placeholder="Paste suggested code snippet for this step"
+                  rows={6}
+                />
+              </div>
               {formErrors.wizardTotalSteps && (
                 <p className="text-xs text-red-600">{formErrors.wizardTotalSteps}</p>
               )}
@@ -992,10 +1071,11 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
                   <div className="flex flex-col items-end gap-1">
                     <button
                       onClick={saveWizard}
-                      className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700"
+                      disabled={savingWizard}
+                      className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60"
                     >
                       <Save size={14} />
-                      Save Wizard
+                      {savingWizard ? "Saving..." : "Save Wizard"}
                     </button>
                     {formErrors.wizardSteps && (
                       <span className="text-xs text-red-600">{formErrors.wizardSteps}</span>
@@ -1034,6 +1114,22 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
             </div>
           </div>
 
+          {ruleType === "wizard" && wizardFlowReady && (
+            <div className="mb-4 rounded border border-indigo-200 bg-indigo-50 px-3 py-3 space-y-2">
+              <div className="text-sm font-semibold text-indigo-800">
+                Workflow Preview (Review Before Saving Wizard)
+              </div>
+              <div className="text-xs text-indigo-700">
+                Generated after the last step. Solid arrows are sequence; dotted arrows are dependencies.
+              </div>
+              <WizardFlowchart
+                steps={wizardFlowSteps}
+                currentStep={Math.min(wizardNextStepNo, wizardTotalSteps)}
+                className="bg-white border-indigo-200"
+              />
+            </div>
+          )}
+
           {/* Rules grid */}
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
             {filtered.map(({ r: rule, index: resultIdx }) => {
@@ -1041,6 +1137,11 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
               const confidencePct = Math.round(
                 (rule.confidence ?? 0) * 100
               );
+              const hasDuplicateMatch = Boolean((rule.duplicate_of || "").trim());
+              const similarityPct =
+                typeof rule.similarity === "number"
+                  ? Math.round(Math.max(0, Math.min(1, rule.similarity)) * 100)
+                  : null;
               let selectorWarning = "";
               let goodExampleCode = "";
               try {
@@ -1132,6 +1233,14 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
                             />
                           </div>
                         </div>
+                        {hasDuplicateMatch && (
+                          <div className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-amber-700">
+                            <span>Duplicate</span>
+                            {similarityPct !== null && (
+                              <span className="font-semibold">{similarityPct}%</span>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -1144,6 +1253,8 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
                             ? "bg-emerald-100 text-emerald-700"
                             : rule.status === "edited"
                             ? "bg-yellow-100 text-yellow-700"
+                            : rule.status === "merged"
+                            ? "bg-gray-200 text-gray-600"
                             : rule.status === "discarded"
                             ? "bg-gray-200 text-gray-600"
                             : "bg-blue-100 text-blue-700"
@@ -1180,6 +1291,12 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
                     {selectorWarning && (
                       <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
                         {selectorWarning}
+                      </div>
+                    )}
+                    {hasDuplicateMatch && (
+                      <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                        Similar to existing rule <span className="font-semibold">{rule.duplicate_of}</span>
+                        {similarityPct !== null ? ` (${similarityPct}% match).` : "."}
                       </div>
                     )}
 
@@ -1256,13 +1373,31 @@ export default function RuleExtractor({ onRuleSaved }: RuleExtractorProps) {
                     )}
 
                     <div className="flex items-center justify-end gap-2 pt-2 border-t border-gray-100">
+                      {hasDuplicateMatch && (
+                        <>
+                          <button
+                            onClick={() => keepDuplicateRule(resultIdx)}
+                            className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100"
+                          >
+                            Keep Anyway
+                          </button>
+                          <button
+                            onClick={() => mergeDuplicateRule(resultIdx)}
+                            className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded border border-gray-300 hover:bg-gray-50"
+                          >
+                            Merge Duplicate
+                          </button>
+                        </>
+                      )}
                       {rule.category !== "wizard" && (
                         <button
                           onClick={() => saveSingleRule(resultIdx)}
-                          className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded bg-indigo-600 text-white hover:bg-indigo-700"
+                          className={`inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded text-white ${
+                            hasDuplicateMatch ? "bg-amber-600 hover:bg-amber-700" : "bg-indigo-600 hover:bg-indigo-700"
+                          }`}
                         >
                           <Save size={14} />
-                          Save Rule
+                          {hasDuplicateMatch ? "Save Anyway" : "Save Rule"}
                         </button>
                       )}
                       <button

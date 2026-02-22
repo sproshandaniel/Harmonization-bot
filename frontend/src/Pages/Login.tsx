@@ -1,5 +1,5 @@
 import { useState } from "react";
-import companyLogo from "../assets/company-logo.svg";
+import companyLogo from "../assets/company-logo.png";
 
 type LoginProps = {
   onLogin: (userName: string, userEmail: string) => void;
@@ -51,7 +51,7 @@ export default function Login({ onLogin }: LoginProps) {
       <div className="hb-login-glow" />
       <div className="hb-login-card">
         <div className="hb-login-logo">
-          <img src={companyLogo} alt="Company logo" className="h-14 w-14" />
+          <img src={companyLogo} alt="Company logo" className="h-20 w-20 object-contain" />
         </div>
         <h1 className="hb-login-title">
           Harmonization Bot
@@ -107,3 +107,5 @@ export default function Login({ onLogin }: LoginProps) {
     </div>
   );
 }
+
+

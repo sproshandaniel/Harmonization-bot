@@ -90,6 +90,18 @@ type DeveloperAnalyticsResponse = {
   daily_by_developer: DeveloperDailyPoint[];
 };
 
+type ViolationSummary = {
+  total_violations: number;
+  categories: number;
+  impacted_projects: number;
+};
+
+type ViolationAnalyticsResponse = {
+  summary: ViolationSummary;
+  violation_heatmap: HeatPoint[];
+  top_violations: TopViolation[];
+};
+
 type AnalyticsEntity = "rules" | "violations" | "developer";
 type AnalyticsPeriod = "week" | "month" | "year" | "custom";
 
@@ -117,9 +129,16 @@ const emptyDeveloperData: DeveloperAnalyticsResponse = {
   daily_by_developer: [],
 };
 
+const emptyViolationData: ViolationAnalyticsResponse = {
+  summary: { total_violations: 0, categories: 0, impacted_projects: 0 },
+  violation_heatmap: [],
+  top_violations: [],
+};
+
 export default function Analytics() {
   const [data, setData] = useState<AnalyticsResponse>(emptyData);
   const [developerData, setDeveloperData] = useState<DeveloperAnalyticsResponse>(emptyDeveloperData);
+  const [violationData, setViolationData] = useState<ViolationAnalyticsResponse>(emptyViolationData);
   const [developerOptions, setDeveloperOptions] = useState<string[]>([]);
   const [entity, setEntity] = useState<AnalyticsEntity>("rules");
   const [period, setPeriod] = useState<AnalyticsPeriod>("week");
@@ -144,22 +163,26 @@ export default function Analytics() {
       try {
         setLoading(true);
         setError(null);
-        const [overviewRes, developerRes, developerOptionsRes] = await Promise.all([
+        const [overviewRes, developerRes, violationRes, developerOptionsRes] = await Promise.all([
           fetch(`/api/analytics/overview?${params.toString()}`),
           fetch(`/api/analytics/developers?${params.toString()}`),
+          fetch(`/api/analytics/violations?${params.toString()}`),
           fetch(`/api/analytics/developer-options?${params.toString()}`),
         ]);
         if (!overviewRes.ok) throw new Error(`Analytics API failed (${overviewRes.status})`);
         if (!developerRes.ok) throw new Error(`Developer Analytics API failed (${developerRes.status})`);
+        if (!violationRes.ok) throw new Error(`Violation Analytics API failed (${violationRes.status})`);
         if (!developerOptionsRes.ok) {
           throw new Error(`Developer options API failed (${developerOptionsRes.status})`);
         }
         const overviewJson = (await overviewRes.json()) as AnalyticsResponse;
         const developerJson = (await developerRes.json()) as DeveloperAnalyticsResponse;
+        const violationJson = (await violationRes.json()) as ViolationAnalyticsResponse;
         const optionsJson = (await developerOptionsRes.json()) as { developers?: string[] };
         if (active) {
           setData(overviewJson);
           setDeveloperData(developerJson);
+          setViolationData(violationJson);
           const options = Array.isArray(optionsJson.developers) ? optionsJson.developers : [];
           setDeveloperOptions(options);
           if (selectedDeveloper && !options.includes(selectedDeveloper)) {
@@ -181,17 +204,24 @@ export default function Analytics() {
 
   const heatData = useMemo(
     () =>
-      data.violation_heatmap.map((item) => ({
+      violationData.violation_heatmap.map((item) => ({
         name: `${item.category}:${item.severity}`,
         count: item.count,
       })),
-    [data.violation_heatmap]
+    [violationData.violation_heatmap]
   );
 
   const totalEvaluated = useMemo(
     () => data.compliance_trend.reduce((acc, item) => acc + item.evaluated, 0),
     [data.compliance_trend]
   );
+
+  const totalViolationEvents = useMemo(
+    () => violationData.summary.total_violations,
+    [violationData.summary.total_violations]
+  );
+
+  const impactedProjects = violationData.summary.impacted_projects;
 
   const topDeveloperNames = useMemo(
     () => developerData.by_developer.slice(0, 3).map((item) => item.developer),
@@ -356,6 +386,67 @@ export default function Analytics() {
 
         <section className="bg-white border rounded-lg p-4 shadow-sm">
           <h3 className="text-sm font-semibold text-gray-700 mb-3">
+            Rule Lifecycle Funnel
+          </h3>
+          <div className="h-64">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={data.lifecycle_funnel} barCategoryGap="25%">
+                <CartesianGrid stroke={CHART_COLORS.grid} strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="stage" interval={0} angle={-20} height={60} textAnchor="end" />
+                <YAxis />
+                <Tooltip />
+                <Bar dataKey="count" fill={CHART_COLORS.barNeutral} radius={[3, 3, 0, 0]} barSize={14} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </section>
+
+        <section className="bg-white border rounded-lg p-4 shadow-sm">
+          <h3 className="text-sm font-semibold text-gray-700 mb-3">
+            Top Rule Authors (Shared Contributors)
+          </h3>
+          <div className="h-64">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={data.top_rule_creators || []} barCategoryGap="30%">
+                <CartesianGrid stroke={CHART_COLORS.grid} strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="creator" interval={0} angle={-20} height={70} textAnchor="end" />
+                <YAxis />
+                <Tooltip />
+                <Bar dataKey="count" fill={CHART_COLORS.barPositive} radius={[3, 3, 0, 0]} barSize={12} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </section>
+      </div>
+      )}
+
+      {entity === "violations" && (
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+        <div className="bg-white border rounded-lg p-4 shadow-sm">
+          <p className="text-xs text-gray-500">Total Violations (Range)</p>
+          <p className="text-2xl font-semibold text-red-600">
+            {totalViolationEvents}
+          </p>
+        </div>
+        <div className="bg-white border rounded-lg p-4 shadow-sm">
+          <p className="text-xs text-gray-500">Violation Categories</p>
+          <p className="text-2xl font-semibold text-indigo-700">
+            {violationData.summary.categories}
+          </p>
+        </div>
+        <div className="bg-white border rounded-lg p-4 shadow-sm">
+          <p className="text-xs text-gray-500">Impacted Projects</p>
+          <p className="text-2xl font-semibold text-amber-600">
+            {impactedProjects}
+          </p>
+        </div>
+      </div>
+      )}
+
+      {entity === "violations" && (
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        <section className="bg-white border rounded-lg p-4 shadow-sm">
+          <h3 className="text-sm font-semibold text-gray-700 mb-3">
             Violation Heatmap (Category + Severity)
           </h3>
           <div className="h-64">
@@ -385,7 +476,7 @@ export default function Analytics() {
                 </tr>
               </thead>
               <tbody>
-                {data.top_violations.map((item) => (
+                {violationData.top_violations.map((item) => (
                   <tr key={item.rule_id} className="border-b">
                     <td className="py-2 px-2 font-medium text-gray-700">
                       {item.rule_id}
@@ -396,10 +487,10 @@ export default function Analytics() {
                     </td>
                   </tr>
                 ))}
-                {!loading && data.top_violations.length === 0 && (
+                {!loading && violationData.top_violations.length === 0 && (
                   <tr>
                     <td className="py-3 px-2 text-gray-500" colSpan={3}>
-                      No rule events yet. Extract and save rules to populate analytics.
+                      No violation data yet for the selected range.
                     </td>
                   </tr>
                 )}
@@ -407,27 +498,10 @@ export default function Analytics() {
             </table>
           </div>
         </section>
-
-        <section className="bg-white border rounded-lg p-4 shadow-sm">
-          <h3 className="text-sm font-semibold text-gray-700 mb-3">
-            Top Rule Authors (Shared Contributors)
-          </h3>
-          <div className="h-64">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={data.top_rule_creators || []} barCategoryGap="30%">
-                <CartesianGrid stroke={CHART_COLORS.grid} strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="creator" interval={0} angle={-20} height={70} textAnchor="end" />
-                <YAxis />
-                <Tooltip />
-                <Bar dataKey="count" fill={CHART_COLORS.barPositive} radius={[3, 3, 0, 0]} barSize={12} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </section>
       </div>
       )}
 
-      {entity !== "rules" && (
+      {entity === "developer" && (
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
         <div className="bg-white border rounded-lg p-4 shadow-sm">
           <p className="text-xs text-gray-500">Total Violations</p>
@@ -450,7 +524,7 @@ export default function Analytics() {
       </div>
       )}
 
-      {entity !== "rules" && (
+      {entity === "developer" && (
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
         <section className="bg-white border rounded-lg p-4 shadow-sm">
           <h3 className="text-sm font-semibold text-gray-700 mb-3">

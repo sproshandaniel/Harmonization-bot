@@ -7,7 +7,7 @@ import Analytics from "./Pages/Analytics";
 import SettingsPage from "./Pages/Settings";
 import ProjectsPage from "./Pages/ProjectsPage";
 import Login from "./Pages/Login";
-import companyLogo from "./assets/company-logo.svg";
+import companyLogo from "./assets/company-logo.png";
 
 function AppShell({
   uiConfig,
@@ -78,7 +78,7 @@ function AppShell({
         <header className="hb-header">
           <div className="flex items-center gap-3">
             <div className="hb-logo-wrap">
-              <img src={companyLogo} alt="Company logo" className="h-9 w-9" />
+              <img src={companyLogo} alt="Company logo" className="h-12 w-12 object-contain" />
             </div>
             <h1 className="hb-title">
               {uiConfig.platform_title}
@@ -212,3 +212,5 @@ export default function App() {
     </Router>
   );
 }
+
+

@@ -56,7 +56,8 @@ def get_pack_rules(
 @router.delete("/packs/{pack_name}")
 def delete_pack(pack_name: str, request: Request):
     user = get_request_user(request)
-    deleted_rules = delete_rule_pack(pack_name, created_by=user)
+    shared_visible = get_show_shared_rules_enabled(default=True)
+    deleted_rules = delete_rule_pack(pack_name, created_by=None if shared_visible else user)
     return {"deleted": True, "deleted_rules": deleted_rules}
 
 

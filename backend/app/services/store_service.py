@@ -203,6 +203,29 @@ def _init_db() -> None:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS wizard_sessions (
+                id TEXT PRIMARY KEY,
+                wizard_id TEXT NOT NULL,
+                developer TEXT NOT NULL,
+                project_id TEXT,
+                current_step INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL DEFAULT 'active',
+                last_bot_message TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS wizard_session_events (
+                row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                sender TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                step_no INTEGER,
+                message TEXT NOT NULL,
+                metadata_json TEXT,
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS dashboard_violations (
                 id TEXT PRIMARY KEY,
                 rule_pack TEXT NOT NULL,
@@ -245,6 +268,8 @@ def _init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_rules_rule_id ON rules(rule_id);
             CREATE INDEX IF NOT EXISTS idx_dashboard_violations_created ON dashboard_violations(created_at);
             CREATE INDEX IF NOT EXISTS idx_wizard_steps_wizard ON wizard_steps(wizard_id);
+            CREATE INDEX IF NOT EXISTS idx_wizard_sessions_dev_status ON wizard_sessions(developer, status);
+            CREATE INDEX IF NOT EXISTS idx_wizard_session_events_session ON wizard_session_events(session_id);
             CREATE INDEX IF NOT EXISTS idx_llm_usage_created_at ON llm_usage_events(created_at);
             CREATE INDEX IF NOT EXISTS idx_llm_usage_developer ON llm_usage_events(developer);
             """
@@ -647,9 +672,30 @@ def save_wizard(
     if not steps:
         raise ValueError("wizard steps are required")
 
+    wizard_name_clean = wizard_name.strip()
+    wizard_description_clean = wizard_description.strip()
+    normalized_pack = str(rule_pack or "wizard").strip() or "wizard"
+
+    with _get_conn() as conn:
+        existing = conn.execute(
+            """
+            SELECT id
+            FROM wizards
+            WHERE project_id = ?
+              AND created_by = ?
+              AND COALESCE(rule_pack, 'wizard') = ?
+              AND LOWER(name) = LOWER(?)
+            LIMIT 1
+            """,
+            (project_id, created_by, normalized_pack, wizard_name_clean),
+        ).fetchone()
+    if existing:
+        raise ValueError(
+            f"wizard '{wizard_name_clean}' already exists in pack '{normalized_pack}' for this project"
+        )
+
     wizard_id = f"wiz-{uuid.uuid4().hex[:10]}"
     now = _now_iso()
-    normalized_pack = str(rule_pack or "wizard").strip() or "wizard"
 
     with _get_conn() as conn:
         conn.execute(
@@ -659,8 +705,8 @@ def save_wizard(
             """,
             (
                 wizard_id,
-                wizard_name.strip(),
-                wizard_description.strip(),
+                wizard_name_clean,
+                wizard_description_clean,
                 int(total_steps),
                 project_id,
                 normalized_pack,
@@ -700,8 +746,8 @@ def save_wizard(
         parsed = _ensure_wizard_fields(
             parsed,
             wizard_id=wizard_id,
-            wizard_name=wizard_name.strip(),
-            wizard_description=wizard_description.strip(),
+            wizard_name=wizard_name_clean,
+            wizard_description=wizard_description_clean,
             total_steps=total_steps,
             step_no=step_no,
         )
@@ -738,6 +784,302 @@ def save_wizard(
         "saved_steps": saved_steps,
         "total_steps": int(total_steps),
     }
+
+
+def list_wizards(
+    created_by: str | None = None,
+    project_id: str | None = None,
+    q: str | None = None,
+) -> list[dict[str, Any]]:
+    query = str(q or "").strip().lower()
+    with _get_conn() as conn:
+        sql = """
+            SELECT id, name, description, total_steps, project_id, rule_pack, created_by, created_at
+            FROM wizards
+        """
+        where: list[str] = []
+        params: list[Any] = []
+        if created_by:
+            where.append("created_by = ?")
+            params.append(created_by)
+        if project_id:
+            where.append("project_id = ?")
+            params.append(project_id)
+        if query:
+            where.append("(LOWER(name) LIKE ? OR LOWER(description) LIKE ?)")
+            like = f"%{query}%"
+            params.extend([like, like])
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY created_at DESC"
+        rows = conn.execute(sql, tuple(params)).fetchall()
+    return [
+        {
+            "id": str(row["id"]),
+            "name": str(row["name"] or ""),
+            "description": str(row["description"] or ""),
+            "total_steps": int(row["total_steps"] or 0),
+            "project_id": row["project_id"],
+            "rule_pack": str(row["rule_pack"] or "wizard"),
+            "created_by": str(row["created_by"] or ""),
+            "created_at": str(row["created_at"] or ""),
+        }
+        for row in rows
+    ]
+
+
+def get_wizard_steps(
+    wizard_id: str,
+    created_by: str | None = None,
+) -> list[dict[str, Any]]:
+    if not wizard_id:
+        return []
+
+    with _get_conn() as conn:
+        wizard_sql = "SELECT id FROM wizards WHERE id = ?"
+        wizard_params: list[Any] = [wizard_id]
+        if created_by:
+            wizard_sql += " AND created_by = ?"
+            wizard_params.append(created_by)
+        wizard = conn.execute(wizard_sql, tuple(wizard_params)).fetchone()
+        if not wizard and created_by:
+            wizard = conn.execute("SELECT id FROM wizards WHERE id = ?", (wizard_id,)).fetchone()
+        if not wizard:
+            return []
+
+        rows = conn.execute(
+            """
+            SELECT step_no, rule_id, yaml_text, created_by, created_at
+            FROM wizard_steps
+            WHERE wizard_id = ?
+            ORDER BY step_no
+            """,
+            (wizard_id,),
+        ).fetchall()
+
+    steps: list[dict[str, Any]] = []
+    for row in rows:
+        yaml_text = str(row["yaml_text"] or "")
+        try:
+            parsed = yaml.safe_load(yaml_text)
+        except Exception:
+            parsed = {}
+        if not isinstance(parsed, dict):
+            parsed = {}
+        wizard_block = parsed.get("wizard")
+        wizard_meta = wizard_block if isinstance(wizard_block, dict) else {}
+        template_block = wizard_meta.get("template")
+        template_meta = template_block if isinstance(template_block, dict) else {}
+
+        steps.append(
+            {
+                "step_no": int(row["step_no"] or 0),
+                "rule_id": str(row["rule_id"] or ""),
+                "yaml": yaml_text,
+                "title": str(wizard_meta.get("step_title") or parsed.get("title") or "").strip(),
+                "description": str(
+                    wizard_meta.get("step_description") or parsed.get("description") or ""
+                ).strip(),
+                "object_type": str(wizard_meta.get("object_type") or "").strip(),
+                "depends_on": wizard_meta.get("depends_on") if isinstance(wizard_meta.get("depends_on"), list) else [],
+                "snippet": str(template_meta.get("snippet") or "").strip(),
+                "created_by": str(row["created_by"] or ""),
+                "created_at": str(row["created_at"] or ""),
+            }
+        )
+    return steps
+
+
+def get_active_wizard_session(
+    developer: str,
+    project_id: str | None = None,
+) -> dict[str, Any] | None:
+    developer_norm = str(developer or "").strip()
+    if not developer_norm:
+        return None
+
+    with _get_conn() as conn:
+        sql = """
+            SELECT id, wizard_id, developer, project_id, current_step, status, last_bot_message, created_at, updated_at
+            FROM wizard_sessions
+            WHERE developer = ? AND LOWER(status) = 'active'
+        """
+        params: list[Any] = [developer_norm]
+        if project_id:
+            sql += " AND project_id = ?"
+            params.append(project_id)
+        sql += " ORDER BY updated_at DESC LIMIT 1"
+        row = conn.execute(sql, tuple(params)).fetchone()
+    if not row:
+        return None
+    return {
+        "id": str(row["id"]),
+        "wizard_id": str(row["wizard_id"]),
+        "developer": str(row["developer"]),
+        "project_id": row["project_id"],
+        "current_step": int(row["current_step"] or 1),
+        "status": str(row["status"] or "active"),
+        "last_bot_message": str(row["last_bot_message"] or ""),
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+    }
+
+
+def get_wizard_session(
+    session_id: str,
+    developer: str | None = None,
+) -> dict[str, Any] | None:
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None
+    with _get_conn() as conn:
+        sql = """
+            SELECT id, wizard_id, developer, project_id, current_step, status, last_bot_message, created_at, updated_at
+            FROM wizard_sessions
+            WHERE id = ?
+        """
+        params: list[Any] = [sid]
+        if developer:
+            sql += " AND developer = ?"
+            params.append(str(developer).strip())
+        row = conn.execute(sql, tuple(params)).fetchone()
+    if not row:
+        return None
+    return {
+        "id": str(row["id"]),
+        "wizard_id": str(row["wizard_id"]),
+        "developer": str(row["developer"]),
+        "project_id": row["project_id"],
+        "current_step": int(row["current_step"] or 1),
+        "status": str(row["status"] or "active"),
+        "last_bot_message": str(row["last_bot_message"] or ""),
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+    }
+
+
+def start_wizard_session(
+    wizard_id: str,
+    developer: str,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    now = _now_iso()
+    sid = f"wizsess-{uuid.uuid4().hex[:12]}"
+    with _get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO wizard_sessions (id, wizard_id, developer, project_id, current_step, status, last_bot_message, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 1, 'active', '', ?, ?)
+            """,
+            (sid, wizard_id, developer, project_id, now, now),
+        )
+    return {
+        "id": sid,
+        "wizard_id": wizard_id,
+        "developer": developer,
+        "project_id": project_id,
+        "current_step": 1,
+        "status": "active",
+        "last_bot_message": "",
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def update_wizard_session(
+    session_id: str,
+    current_step: int | None = None,
+    status: str | None = None,
+    last_bot_message: str | None = None,
+) -> bool:
+    sid = str(session_id or "").strip()
+    if not sid:
+        return False
+    sets: list[str] = []
+    params: list[Any] = []
+    if current_step is not None:
+        sets.append("current_step = ?")
+        params.append(int(current_step))
+    if status is not None:
+        sets.append("status = ?")
+        params.append(str(status).strip() or "active")
+    if last_bot_message is not None:
+        sets.append("last_bot_message = ?")
+        params.append(str(last_bot_message))
+    sets.append("updated_at = ?")
+    params.append(_now_iso())
+    params.append(sid)
+    with _get_conn() as conn:
+        cur = conn.execute(
+            f"UPDATE wizard_sessions SET {', '.join(sets)} WHERE id = ?",
+            tuple(params),
+        )
+    return cur.rowcount > 0
+
+
+def add_wizard_session_event(
+    session_id: str,
+    sender: str,
+    message: str,
+    event_type: str = "message",
+    step_no: int | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    sid = str(session_id or "").strip()
+    if not sid:
+        return
+    with _get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO wizard_session_events (session_id, sender, event_type, step_no, message, metadata_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                sid,
+                str(sender or "system").strip() or "system",
+                str(event_type or "message").strip() or "message",
+                int(step_no) if step_no is not None else None,
+                str(message or ""),
+                json.dumps(metadata or {}),
+                _now_iso(),
+            ),
+        )
+
+
+def list_wizard_session_events(session_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    sid = str(session_id or "").strip()
+    if not sid:
+        return []
+    lim = max(1, min(int(limit or 50), 200))
+    with _get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT row_id, sender, event_type, step_no, message, metadata_json, created_at
+            FROM wizard_session_events
+            WHERE session_id = ?
+            ORDER BY row_id DESC
+            LIMIT ?
+            """,
+            (sid, lim),
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in reversed(rows):
+        try:
+            metadata = json.loads(str(row["metadata_json"] or "{}"))
+        except Exception:
+            metadata = {}
+        out.append(
+            {
+                "row_id": int(row["row_id"]),
+                "sender": str(row["sender"] or ""),
+                "event_type": str(row["event_type"] or "message"),
+                "step_no": int(row["step_no"]) if row["step_no"] is not None else None,
+                "message": str(row["message"] or ""),
+                "metadata": metadata if isinstance(metadata, dict) else {},
+                "created_at": str(row["created_at"] or ""),
+            }
+        )
+    return out
 
 
 def get_rules_for_project(project_id: str, created_by: str | None = None) -> list[dict[str, Any]]:
@@ -857,7 +1199,7 @@ def list_rule_packs(created_by: str | None = None) -> list[dict[str, Any]]:
         grouped_rule_rows = conn.execute(grouped_sql, tuple(grouped_params)).fetchall()
         wizard_sql = """
             SELECT COALESCE(w.rule_pack, 'wizard') AS name,
-                   COUNT(ws.row_id) AS wizard_count,
+                   COUNT(DISTINCT w.id) AS wizard_count,
                    MAX(w.created_at) AS updated_at
             FROM wizards w
             LEFT JOIN wizard_steps ws ON ws.wizard_id = w.id
@@ -1612,6 +1954,20 @@ def get_ai_llm_fallback_enabled(default: bool = False) -> bool:
         if isinstance(value, (int, float)):
             return bool(value)
     return default
+
+
+def get_duplicate_similarity_threshold(default: float = 0.9) -> float:
+    settings = get_app_settings_unmasked()
+    rule_engine = settings.get("rule_engine_defaults")
+    if isinstance(rule_engine, dict):
+        value = rule_engine.get("duplicate_similarity_threshold")
+        try:
+            threshold = float(value)
+            if 0.0 <= threshold <= 1.0:
+                return threshold
+        except Exception:
+            pass
+    return float(default)
 
 
 def get_show_shared_rules_enabled(default: bool = True) -> bool:
@@ -2539,6 +2895,97 @@ def compute_developer_analytics(
     }
 
 
+def compute_violation_analytics(
+    created_by: str | None = None,
+    developers: list[str] | None = None,
+    developer: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict[str, Any]:
+    start_bound, end_bound = _resolve_date_bounds(start_date, end_date)
+    with _get_conn() as conn:
+        sql = """
+            SELECT rule_pack, object_name, transport, severity, created_at
+            FROM dashboard_violations
+        """
+        where_clauses: list[str] = []
+        params: list[Any] = []
+        where_clauses.append("LOWER(COALESCE(status, 'not fixed')) = 'not fixed'")
+        if created_by:
+            where_clauses.append("developer = ?")
+            params.append(created_by)
+        if developers:
+            normalized = [str(d).strip().lower() for d in developers if str(d).strip()]
+            if normalized:
+                placeholders = ",".join("?" for _ in normalized)
+                where_clauses.append(f"LOWER(developer) IN ({placeholders})")
+                params.extend(normalized)
+        if developer:
+            where_clauses.append("LOWER(developer) = ?")
+            params.append(str(developer).strip().lower())
+        if start_bound:
+            where_clauses.append("date(created_at) >= date(?)")
+            params.append(start_bound)
+        if end_bound:
+            where_clauses.append("date(created_at) <= date(?)")
+            params.append(end_bound)
+        if where_clauses:
+            sql += " WHERE " + " AND ".join(where_clauses)
+        rows = conn.execute(sql, tuple(params)).fetchall()
+
+    entries = [dict(row) for row in rows]
+    if not entries:
+        return {
+            "summary": {
+                "total_violations": 0,
+                "categories": 0,
+                "impacted_projects": 0,
+            },
+            "violation_heatmap": [],
+            "top_violations": [],
+        }
+
+    heatmap_counts: dict[tuple[str, str], int] = {}
+    top_map: dict[str, dict[str, Any]] = {}
+    project_keys: set[str] = set()
+
+    for entry in entries:
+        category = str(entry.get("rule_pack") or "generic").lower()
+        severity = str(entry.get("severity") or "WARNING").upper()
+        heat_key = (category, severity)
+        heatmap_counts[heat_key] = heatmap_counts.get(heat_key, 0) + 1
+
+        violation_key = str(entry.get("object_name") or category or "unknown")
+        transport = _normalize_transport_value(str(entry.get("transport") or "Unknown"))
+        project_keys.add(transport)
+        if violation_key not in top_map:
+            top_map[violation_key] = {"rule_id": violation_key, "count": 0, "projects": set()}
+        top_map[violation_key]["count"] += 1
+        top_map[violation_key]["projects"].add(transport)
+
+    violation_heatmap = [
+        {"category": category, "severity": severity, "count": count}
+        for (category, severity), count in sorted(
+            heatmap_counts.items(),
+            key=lambda item: (item[0][0], item[0][1]),
+        )
+    ]
+
+    top_violations = sorted(top_map.values(), key=lambda item: item["count"], reverse=True)[:5]
+    for item in top_violations:
+        item["projects"] = sorted(item["projects"])
+
+    return {
+        "summary": {
+            "total_violations": len(entries),
+            "categories": len(violation_heatmap),
+            "impacted_projects": len(project_keys),
+        },
+        "violation_heatmap": violation_heatmap,
+        "top_violations": top_violations,
+    }
+
+
 def list_analytics_developers(
     created_by: str | None = None,
     developers: list[str] | None = None,
@@ -2677,3 +3124,250 @@ def seed_demo_projects() -> None:
                         _now_iso(),
                     ),
                 )
+
+    seed_marker_key = "seeded_app_build_wizard_v1"
+    with _get_conn() as conn:
+        marker = conn.execute(
+            "SELECT config_value FROM ui_config WHERE config_key = ?",
+            (seed_marker_key,),
+        ).fetchone()
+        if marker is not None:
+            return
+        existing_seed_wizard = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM wizards WHERE LOWER(name) = LOWER(?)",
+                ("Application Build Wizard",),
+            ).fetchone()[0]
+        )
+    if existing_seed_wizard > 0:
+        with _get_conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO ui_config (config_key, config_value) VALUES (?, ?)",
+                (seed_marker_key, "true"),
+            )
+        return
+
+    projects = list_projects()
+    if not projects:
+        return
+    project_id = str(projects[0].get("id") or "").strip()
+    if not project_id:
+        return
+
+    wizard_steps: list[dict[str, Any]] = [
+        {
+            "yaml": yaml.safe_dump(
+                {
+                    "id": "wizard.application.build.step.1",
+                    "type": "wizard",
+                    "title": "Create Root Data Model",
+                    "severity": "MAJOR",
+                    "description": "Create the root data object with stable keys and required metadata.",
+                    "selector": {"pattern": "create root data model"},
+                    "fix": "Define the root model and activate it.",
+                    "rationale": "A stable root model is the base for the full application flow.",
+                    "confidence": 0.95,
+                    "wizard": {
+                        "step_no": 1,
+                        "step_title": "Root Data Model",
+                        "step_description": "Create and activate root data model.",
+                        "object_type": "data_model",
+                        "depends_on": [],
+                        "template": {
+                            "language": "ABAP",
+                            "snippet": (
+                                "\" Define root model object and activate\n"
+                                "\" Include key fields and creation metadata"
+                            ),
+                        },
+                    },
+                },
+                sort_keys=False,
+                width=120,
+            ),
+            "confidence": 0.95,
+            "category": "wizard",
+        },
+        {
+            "yaml": yaml.safe_dump(
+                {
+                    "id": "wizard.application.build.step.2",
+                    "type": "wizard",
+                    "title": "Create API Projection Layer",
+                    "severity": "MAJOR",
+                    "description": "Create projection layer on top of root model for external exposure.",
+                    "selector": {"pattern": "create projection layer"},
+                    "fix": "Define projection and activate it.",
+                    "rationale": "Projection controls what consumers can access.",
+                    "confidence": 0.95,
+                    "wizard": {
+                        "step_no": 2,
+                        "step_title": "Projection Layer",
+                        "step_description": "Create and activate projection layer.",
+                        "object_type": "projection_model",
+                        "depends_on": [1],
+                        "template": {
+                            "language": "ABAP",
+                            "snippet": (
+                                "\" Define projection object from root model\n"
+                                "\" Expose only required fields"
+                            ),
+                        },
+                    },
+                },
+                sort_keys=False,
+                width=120,
+            ),
+            "confidence": 0.95,
+            "category": "wizard",
+        },
+        {
+            "yaml": yaml.safe_dump(
+                {
+                    "id": "wizard.application.build.step.3",
+                    "type": "wizard",
+                    "title": "Define Business Behavior Rules",
+                    "severity": "MAJOR",
+                    "description": "Define operation behavior (create/update/delete/validate) for root model.",
+                    "selector": {"pattern": "define behavior rules"},
+                    "fix": "Define behavior and activate.",
+                    "rationale": "Behavior rules control transactional logic and validations.",
+                    "confidence": 0.95,
+                    "wizard": {
+                        "step_no": 3,
+                        "step_title": "Behavior Rules",
+                        "step_description": "Create and activate behavior rules.",
+                        "object_type": "behavior_definition",
+                        "depends_on": [1],
+                        "template": {
+                            "language": "ABAP",
+                            "snippet": (
+                                "\" Define managed behavior for root model\n"
+                                "\" Enable CRUD operations as needed"
+                            ),
+                        },
+                    },
+                },
+                sort_keys=False,
+                width=120,
+            ),
+            "confidence": 0.95,
+            "category": "wizard",
+        },
+        {
+            "yaml": yaml.safe_dump(
+                {
+                    "id": "wizard.application.build.step.4",
+                    "type": "wizard",
+                    "title": "Create Service Definition",
+                    "severity": "MAJOR",
+                    "description": "Expose projection layer through service definition.",
+                    "selector": {"pattern": "create service definition"},
+                    "fix": "Create service definition and activate.",
+                    "rationale": "Service definition exposes application entities to clients.",
+                    "confidence": 0.95,
+                    "wizard": {
+                        "step_no": 4,
+                        "step_title": "Service Definition",
+                        "step_description": "Create and activate service definition.",
+                        "object_type": "service_definition",
+                        "depends_on": [2, 3],
+                        "template": {
+                            "language": "ABAP",
+                            "snippet": (
+                                "\" Define service and expose projection entities"
+                            ),
+                        },
+                    },
+                },
+                sort_keys=False,
+                width=120,
+            ),
+            "confidence": 0.95,
+            "category": "wizard",
+        },
+        {
+            "yaml": yaml.safe_dump(
+                {
+                    "id": "wizard.application.build.step.5",
+                    "type": "wizard",
+                    "title": "Create Service Binding",
+                    "severity": "MAJOR",
+                    "description": "Create service binding and publish service endpoint.",
+                    "selector": {"pattern": "create service binding"},
+                    "fix": "Create and activate service binding.",
+                    "rationale": "Binding is required to expose service endpoints and UI consumption.",
+                    "confidence": 0.95,
+                    "wizard": {
+                        "step_no": 5,
+                        "step_title": "Service Binding",
+                        "step_description": "Create service binding and publish endpoint.",
+                        "object_type": "service_binding",
+                        "depends_on": [4],
+                        "template": {
+                            "language": "ABAP",
+                            "snippet": (
+                                "\" Create service binding in ADT and publish endpoint"
+                            ),
+                        },
+                    },
+                },
+                sort_keys=False,
+                width=120,
+            ),
+            "confidence": 0.95,
+            "category": "wizard",
+        },
+        {
+            "yaml": yaml.safe_dump(
+                {
+                    "id": "wizard.application.build.step.6",
+                    "type": "wizard",
+                    "title": "Implement Service Logic",
+                    "severity": "MAJOR",
+                    "description": "Implement required handlers/classes and activate all dependent objects.",
+                    "selector": {"pattern": "implement service logic"},
+                    "fix": "Implement classes and activate.",
+                    "rationale": "Implementation layer completes executable business behavior.",
+                    "confidence": 0.95,
+                    "wizard": {
+                        "step_no": 6,
+                        "step_title": "Implementation Layer",
+                        "step_description": "Implement handlers/classes and activate.",
+                        "object_type": "abap_class",
+                        "depends_on": [3],
+                        "template": {
+                            "language": "ABAP",
+                            "snippet": (
+                                "\" Implement required handler class methods\n"
+                                "\" Add validations and action logic"
+                            ),
+                        },
+                    },
+                },
+                sort_keys=False,
+                width=120,
+            ),
+            "confidence": 0.95,
+            "category": "wizard",
+        },
+    ]
+
+    try:
+        save_wizard(
+            project_id=project_id,
+            wizard_name="Application Build Wizard",
+            wizard_description="Generic step-by-step wizard to build a business application end-to-end.",
+            total_steps=6,
+            steps=wizard_steps,
+            created_by="name@zalaris.com",
+            rule_pack="multi-object-guided-dev",
+        )
+        with _get_conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO ui_config (config_key, config_value) VALUES (?, ?)",
+                (seed_marker_key, "true"),
+            )
+    except Exception:
+        # Seed routine must stay best-effort and never break app startup.
+        return

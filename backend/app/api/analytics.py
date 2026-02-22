@@ -6,6 +6,7 @@ from app.api.auth_context import get_request_user
 from app.services.store_service import (
     compute_analytics_overview,
     compute_developer_analytics,
+    compute_violation_analytics,
     get_managed_developers_for_architect,
     get_show_shared_rules_enabled,
     list_analytics_developers,
@@ -65,6 +66,28 @@ def get_developer_analytics(
     scoped_user = None if managed_developers else user
     start_bound, end_bound = _resolve_period_bounds(period, start_date, end_date)
     return compute_developer_analytics(
+        created_by=scoped_user,
+        developers=managed_developers or None,
+        developer=developer,
+        start_date=start_bound,
+        end_date=end_bound,
+    )
+
+
+@router.get("/analytics/violations")
+def get_violation_analytics(
+    request: Request,
+    period: str = Query(default="week"),
+    start_date: str | None = Query(default=None),
+    end_date: str | None = Query(default=None),
+    developer: str | None = Query(default=None),
+):
+    user = get_request_user(request)
+    shared_visible = get_show_shared_rules_enabled(default=True)
+    managed_developers = get_managed_developers_for_architect(user) if shared_visible else []
+    scoped_user = None if managed_developers else user
+    start_bound, end_bound = _resolve_period_bounds(period, start_date, end_date)
+    return compute_violation_analytics(
         created_by=scoped_user,
         developers=managed_developers or None,
         developer=developer,
