@@ -110,6 +110,53 @@ class WizardConversationTests(unittest.TestCase):
         finally:
             delete_wizard(wizard_id, created_by="name@zalaris.com")
 
+    def test_validation_query_bypasses_active_wizard_session(self):
+        projects = list_projects()
+        self.assertTrue(projects, "expected seeded projects to exist")
+        project_id = str(projects[0]["id"])
+
+        wizard_name = f"Wizard Validation Bypass {uuid.uuid4().hex[:8]}"
+        developer = f"dev-{uuid.uuid4().hex[:8]}@example.com"
+
+        result = save_wizard(
+            project_id=project_id,
+            wizard_name=wizard_name,
+            wizard_description="ensure validation bypasses active wizard",
+            total_steps=1,
+            steps=[
+                {"yaml": _build_step_yaml(1, "Create Root View"), "confidence": 0.9, "category": "wizard"},
+            ],
+            created_by="name@zalaris.com",
+            rule_pack="test-wizard-pack",
+        )
+        wizard_id = result["wizard_id"]
+
+        try:
+            started = bot_service.start_wizard_conversation(
+                query=wizard_name,
+                developer=developer,
+                created_by="name@zalaris.com",
+                project_id=project_id,
+                wizard_id=wizard_id,
+            )
+            self.assertIsNotNone(started["wizard_session"])
+            self.assertEqual(started["wizard_session"]["status"], "active")
+
+            response = bot_service.assist_with_rules(
+                query="validate current object against governance rules",
+                code="DATA lv_time TYPE catshours. lv_time = lv_time + lv_time.",
+                object_name="Z_TEST_OBJECT",
+                project_id=project_id,
+                developer=developer,
+                created_by="name@zalaris.com",
+            )
+
+            message = str(response.get("message") or "")
+            self.assertNotIn("active wizard session", message.lower())
+            self.assertFalse("wizard_session" in response)
+        finally:
+            delete_wizard(wizard_id, created_by="name@zalaris.com")
+
 
 if __name__ == "__main__":
     unittest.main()

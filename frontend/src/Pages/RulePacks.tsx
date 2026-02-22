@@ -664,6 +664,60 @@ export default function RulePacks() {
                 </div>
               );
             })}
+            {visibleNonWizardRules.length > 0 && (
+              <div className="pt-2 border-t">
+                <div className="text-xs font-semibold text-gray-600 px-1 pb-2">Rules</div>
+                <div className="space-y-3">
+                  {visibleNonWizardRules.map((rule, idx) => {
+                    const canEdit =
+                      !!rule.db_id &&
+                      (!rule.created_by || String(rule.created_by).toLowerCase() === currentUser);
+                    return (
+                      <div key={`${rule._id || "rule"}-${idx}`} className="relative border rounded-lg overflow-hidden">
+                        <div className="px-3 py-2 bg-gray-50 border-b flex items-center justify-between pr-10 gap-2">
+                          <div className="text-sm font-medium text-gray-800 truncate">{rule._id || `Rule ${idx + 1}`}</div>
+                          <div className="text-xs text-gray-600">
+                            {rule.category || "code"} | {rule._severity || "MAJOR"} | {Math.round((rule.confidence || 0) * 100)}%
+                          </div>
+                        </div>
+                        {canEdit ? (
+                          <button
+                            onClick={() => setConfirmDeleteRuleId(rule.db_id || null)}
+                            className="absolute right-2 top-2 inline-flex items-center justify-center w-7 h-7 rounded bg-red-50 text-red-600 hover:bg-red-100"
+                            title="Delete rule"
+                            aria-label={`Delete rule ${rule._id || idx + 1}`}
+                          >
+                            <X size={14} />
+                          </button>
+                        ) : null}
+                        <div className="px-3 py-2 bg-white border-b">
+                          <button
+                            onClick={() => toggleRuleExpanded(String(rule.db_id ?? idx))}
+                            className="text-xs text-indigo-600 hover:text-indigo-800"
+                          >
+                            {expandedRuleKeys.has(String(rule.db_id ?? idx)) ? "Hide YAML" : "Show YAML"}
+                          </button>
+                          {canEdit ? (
+                            <button
+                              onClick={() => openEditYamlDialog(rule)}
+                              className="ml-3 text-xs text-indigo-600 hover:text-indigo-800 inline-flex items-center gap-1"
+                            >
+                              <Edit3 size={12} />
+                              Edit YAML
+                            </button>
+                          ) : null}
+                        </div>
+                        {expandedRuleKeys.has(String(rule.db_id ?? idx)) && (
+                          <pre className="bg-gray-900 text-gray-100 text-xs p-3 overflow-auto max-h-56">
+                            {rule.yaml}
+                          </pre>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         ) : (
           <div className="space-y-3 max-h-[62vh] overflow-y-auto pr-1">

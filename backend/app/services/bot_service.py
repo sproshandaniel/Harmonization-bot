@@ -1213,6 +1213,9 @@ def _maybe_handle_wizard_assist(
 ) -> dict[str, Any] | None:
     q = (query or "").strip()
     q_low = q.lower()
+    # Explicit validation must never be hijacked by active wizard sessions.
+    if _is_validation_query(q):
+        return None
     active = get_active_wizard_session(developer=developer, project_id=project_id)
     if active:
         if _is_done_signal(q_low):
@@ -1283,7 +1286,8 @@ def assist_with_rules(
             developer=developer,
         )
 
-    wants_template = _is_template_or_wizard_request(query)
+    # Validation flow must stay on rule retrieval + code checks, never template/wizard suggestion mode.
+    wants_template = (not is_validate) and _is_template_or_wizard_request(query)
     if wants_template:
         template_pool = [r for r in retrieved if r.rule_type in {"template", "wizard"}]
         if not template_pool:
