@@ -12,6 +12,7 @@ from app.api import (
     projects,
     rule_test,
     rules_summary,
+    technical_docs,
     upload_doc,
     wizards,
 )
@@ -31,6 +32,7 @@ app.include_router(config.router, prefix="/api")
 app.include_router(rule_test.router, prefix="/api")
 app.include_router(wizards.router, prefix="/api")
 app.include_router(bot.router, prefix="/api")
+app.include_router(technical_docs.router, prefix="/api")
 
 seed_demo_projects()
 
