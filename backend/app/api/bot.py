@@ -7,6 +7,7 @@ from app.api.auth_context import get_request_user
 from app.services.bot_service import (
     advance_wizard_conversation,
     assist_with_rules,
+    explain_abap_code,
     get_wizard_conversation_status,
     start_wizard_conversation,
 )
@@ -134,4 +135,26 @@ def bot_wizard_status(request: Request, payload: BotWizardStatusIn | None = None
         developer=developer,
         project_id=payload.project_id,
         session_id=payload.session_id,
+    )
+
+
+class BotExplainIn(BaseModel):
+    code: str = ""
+    object_name: str = "ADT_OBJECT"
+    project_id: str | None = None
+    developer: str | None = None
+
+
+@router.post("/bot/explain")
+def bot_explain(request: Request, payload: BotExplainIn | None = None):
+    if payload is None:
+        payload = BotExplainIn()
+    user = get_request_user(request)
+    developer = payload.developer or user
+    return explain_abap_code(
+        code=payload.code,
+        object_name=payload.object_name,
+        developer=developer,
+        created_by=user,
+        project_id=payload.project_id,
     )

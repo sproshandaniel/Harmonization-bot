@@ -1365,3 +1365,115 @@ def assist_with_rules(
             for rule in retrieved
         ],
     }
+
+
+def explain_abap_code(
+    code: str,
+    object_name: str = "ADT_OBJECT",
+    developer: str = "name@zalaris.com",
+    created_by: str | None = None,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    del created_by, project_id  # kept for API parity/traceability
+    cleaned_code = (code or "").strip()
+    if not cleaned_code:
+        return {
+            "message": "No ABAP code provided to explain.",
+            "object_name": object_name,
+            "explanation": "",
+        }
+
+    client = _get_embed_client()
+    if client is None:
+        return {
+            "message": "LLM is not configured. Set model API key in Settings to use Explain.",
+            "object_name": object_name,
+            "explanation": "",
+        }
+
+    model = get_ai_model_name(default="gpt-4.1-mini")
+    explain_prompt = (
+        "Act as a senior SAP solution architect.\n\n"
+        "Explain the following ABAP code in a way that is understandable to:\n"
+        "- Technical consultants\n"
+        "- Functional consultants\n"
+        "- Business users with no technical background\n\n"
+        "Structure your explanation in the following sections:\n\n"
+        "1. Business Context\n"
+        "   - What business process does this support?\n"
+        "   - Where in SAP would this typically be used? (e.g., SD, MM, FI, HCM, custom Z process)\n"
+        "   - What problem is it solving?\n\n"
+        "2. Business Purpose\n"
+        "   - Why does this code exist?\n"
+        "   - What business risk or inefficiency does it address?\n"
+        "   - What would happen if this logic did not exist?\n\n"
+        "3. High-Level Functional Flow (Non-Technical)\n"
+        "   - Explain step-by-step what the program does in plain English.\n"
+        "   - Avoid ABAP syntax in this section.\n"
+        "   - Use business language.\n\n"
+        "4. Technical Breakdown (For Consultants)\n"
+        "   - Key tables used and why\n"
+        "   - Important logic blocks (SELECT, LOOP, BADI, BAPI, enhancements, etc.)\n"
+        "   - Performance considerations\n"
+        "   - Error handling approach\n"
+        "   - Dependencies (custom tables, config, user exits, etc.)\n\n"
+        "5. Inputs and Outputs\n"
+        "   - What triggers this program?\n"
+        "   - What data goes in?\n"
+        "   - What data comes out?\n"
+        "   - Does it update database tables or only display information?\n\n"
+        "6. Risks and Control Considerations\n"
+        "   - Data integrity risks\n"
+        "   - Performance risks\n"
+        "   - Authorization considerations\n\n"
+        "7. Summary in One Paragraph\n"
+        "   - A short executive-level explanation of what this code does.\n\n"
+        "Here is the ABAP code:\n"
+        f"{cleaned_code}"
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a senior SAP solution architect specializing in ABAP and business process design.",
+        },
+        {"role": "user", "content": explain_prompt},
+    ]
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.2,
+            max_tokens=1200,
+        )
+        in_tokens, out_tokens, total_tokens = _extract_usage_tokens(getattr(response, "usage", None))
+        if total_tokens > 0:
+            log_llm_usage_event(
+                developer=developer,
+                feature="abap_code_explain",
+                provider="openai",
+                model=model,
+                input_tokens=in_tokens,
+                output_tokens=out_tokens,
+                total_tokens=total_tokens,
+                metadata={"object_name": object_name, "code_chars": len(cleaned_code)},
+            )
+        content = response.choices[0].message.content if response.choices else ""
+        explanation = (content or "").strip()
+        if not explanation:
+            return {
+                "message": "Explain request completed but returned empty content.",
+                "object_name": object_name,
+                "explanation": "",
+            }
+        return {
+            "message": "ABAP explanation generated.",
+            "object_name": object_name,
+            "explanation": explanation,
+        }
+    except Exception as ex:
+        return {
+            "message": f"Explain request failed: {str(ex)}",
+            "object_name": object_name,
+            "explanation": "",
+        }
