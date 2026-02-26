@@ -53,6 +53,7 @@ class ResolvedRule:
 
 _EMBED_CLIENT = None
 _EMBED_CLIENT_KEY = ""
+_VECTOR_SEARCH_DISABLED = False
 
 
 def _get_embed_client():
@@ -306,6 +307,9 @@ def _load_rule_rows(
 
 
 def _vector_scores(query: str, rules: list[ResolvedRule], developer: str) -> dict[str, float]:
+    global _VECTOR_SEARCH_DISABLED
+    if _VECTOR_SEARCH_DISABLED:
+        return {}
     client = _get_embed_client()
     if client is None:
         return {}
@@ -329,6 +333,8 @@ def _vector_scores(query: str, rules: list[ResolvedRule], developer: str) -> dic
                 metadata={"query_length": len(query or "")},
             )
     except Exception:
+        # Avoid repeated runtime noise if local vector storage is unavailable/corrupted.
+        _VECTOR_SEARCH_DISABLED = True
         return {}
 
     by_id = {rule.rule_id: rule for rule in rules}
@@ -603,13 +609,26 @@ def _rank_rules(
     intent = _extract_query_intent(query)
     threshold = _min_relevance_threshold(query, intent, is_validate)
     candidate_pool = _filter_candidate_pool(query, rules, is_validate)
-    vector_map = _vector_scores(query, candidate_pool, developer=developer)
-
     scored: list[tuple[float, ResolvedRule]] = []
     for rule in candidate_pool:
-        score = _compute_rule_relevance(query, intent, rule, vector_map.get(rule.rule_id, 0.0))
+        score = _compute_rule_relevance(query, intent, rule, vector_score=0.0)
         if score >= threshold:
             scored.append((score, rule))
+
+    # Keep latency low when lexical ranking is already good; enrich with embeddings when confidence is weak.
+    top_score = max((score for score, _ in scored), default=0.0)
+    needs_vector_refinement = (not is_validate) and (
+        len(scored) < max(2, min(5, len(candidate_pool) // 8)) or top_score < (threshold + 1.5)
+    )
+    if needs_vector_refinement and candidate_pool:
+        vector_map = _vector_scores(query, candidate_pool, developer=developer)
+        rescored: list[tuple[float, ResolvedRule]] = []
+        for rule in candidate_pool:
+            score = _compute_rule_relevance(query, intent, rule, vector_map.get(rule.rule_id, 0.0))
+            if score >= threshold:
+                rescored.append((score, rule))
+        if rescored:
+            scored = rescored
 
     scored.sort(key=lambda item: item[0], reverse=True)
     ranked = [item[1] for item in scored]
@@ -657,6 +676,16 @@ def _is_validation_query(query: str) -> bool:
     return "validate" in q or "violation" in q or "check code" in q
 
 
+def _is_explain_query(query: str) -> bool:
+    q = (query or "").strip().lower()
+    return bool(
+        re.search(
+            r"\b(explain|explanation|what does this code do|describe this code|understand this code)\b",
+            q,
+        )
+    )
+
+
 def _is_template_or_wizard_request(query: str) -> bool:
     q = (query or "").lower()
     template_terms = (
@@ -690,6 +719,37 @@ def _is_template_or_wizard_request(query: str) -> bool:
     has_action_word = bool(re.search(r"\b(get|fetch|retrieve|create|build|implement|generate)\b", q))
     has_domain_hint = bool(re.search(r"\b(employee|employees|manager|manger|reportee|team|role)\b", q))
     return has_code_word and (has_action_word or has_domain_hint)
+
+
+def _is_explicit_wizard_request(query: str) -> bool:
+    q_low = (query or "").strip().lower()
+    return (
+        bool(re.search(r"\bwizard\b", q_low))
+        or "step by step" in q_low
+        or "step-by-step" in q_low
+        or bool(re.search(r"\bsteps?\b", q_low))
+    )
+
+
+def _is_wizard_control_signal(query: str) -> bool:
+    q_low = (query or "").strip().lower()
+    return _is_done_signal(q_low) or _is_status_signal(q_low) or _is_restart_signal(q_low)
+
+
+def _classify_assist_request_mode(query: str) -> str:
+    """
+    Mutually exclusive request-mode classifier.
+    Priority order: validation > explain > wizard > template > rules.
+    """
+    if _is_validation_query(query):
+        return "validation"
+    if _is_explain_query(query):
+        return "explain"
+    if _is_explicit_wizard_request(query) or _is_wizard_control_signal(query):
+        return "wizard"
+    if _is_template_or_wizard_request(query):
+        return "template"
+    return "rules"
 
 
 def _has_satisfactory_rule_match(query: str, rules: list[ResolvedRule]) -> bool:
@@ -844,6 +904,11 @@ def _is_status_signal(query: str) -> bool:
     return bool(re.search(r"\b(status|progress|where are we|current step|what next)\b", q))
 
 
+def _is_restart_signal(query: str) -> bool:
+    q = (query or "").strip().lower()
+    return bool(re.search(r"\b(restart|start over|from beginning|reset wizard|new wizard|step 1)\b", q))
+
+
 def _wizard_candidate_score(query: str, wizard: dict[str, Any]) -> float:
     q_tokens = _tokenize(query or "")
     haystack = " ".join(
@@ -950,6 +1015,7 @@ def _build_wizard_response(
             "session_id": session.get("id"),
             "wizard_id": wizard.get("id"),
             "wizard_name": wizard.get("name"),
+            "wizard_description": wizard.get("description"),
             "project_id": session.get("project_id"),
             "current_step": session.get("current_step"),
             "status": session.get("status"),
@@ -981,6 +1047,7 @@ def start_wizard_conversation(
     created_by: str | None = None,
     project_id: str | None = None,
     wizard_id: str | None = None,
+    force_restart: bool = False,
 ) -> dict[str, Any]:
     wizard: dict[str, Any] | None = None
     if wizard_id:
@@ -1007,6 +1074,21 @@ def start_wizard_conversation(
         }
 
     active = get_active_wizard_session(developer=developer, project_id=project_id)
+    if active and force_restart:
+        add_wizard_session_event(
+            str(active.get("id")),
+            sender="bot",
+            event_type="wizard_restarted",
+            step_no=int(active.get("current_step") or 1),
+            message="Wizard session restarted from Step 1 by user request.",
+        )
+        update_wizard_session(
+            str(active.get("id")),
+            status="completed",
+            last_bot_message="Wizard session restarted from Step 1 by user request.",
+        )
+        active = None
+
     if active and str(active.get("wizard_id")) == str(wizard.get("id")):
         steps = get_wizard_steps(str(wizard.get("id")), created_by=None)
         curr = int(active.get("current_step") or 1)
@@ -1213,8 +1295,9 @@ def _maybe_handle_wizard_assist(
 ) -> dict[str, Any] | None:
     q = (query or "").strip()
     q_low = q.lower()
-    # Explicit validation must never be hijacked by active wizard sessions.
-    if _is_validation_query(q):
+    wants_wizard = _is_explicit_wizard_request(q)
+    # Validation/explain requests must never be hijacked by active wizard sessions.
+    if _is_validation_query(q) or _is_explain_query(q):
         return None
     active = get_active_wizard_session(developer=developer, project_id=project_id)
     if active:
@@ -1222,20 +1305,17 @@ def _maybe_handle_wizard_assist(
             return advance_wizard_conversation(session_id=str(active.get("id")), developer=developer, user_message=q)
         if _is_status_signal(q_low):
             return get_wizard_conversation_status(developer=developer, project_id=project_id, session_id=str(active.get("id")))
-        current = get_wizard_conversation_status(developer=developer, project_id=project_id, session_id=str(active.get("id")))
-        current["message"] = (
-            f"You are in an active wizard session. {current.get('message')}\n"
-            "Reply 'done' after you complete and activate this step."
-        )
-        return current
+        if wants_wizard or _is_restart_signal(q_low):
+            return start_wizard_conversation(
+                query=q,
+                developer=developer,
+                created_by=created_by,
+                project_id=project_id,
+                force_restart=True,
+            )
+        # Do not hijack general template/help requests with an active wizard session.
+        return None
 
-    wants_wizard = (
-        "wizard" in q_low
-        or "rap" in q_low
-        or "step by step" in q_low
-        or "guide me" in q_low
-        or ("steps" in q_low and "application" in q_low)
-    )
     if not wants_wizard:
         return None
     return start_wizard_conversation(query=q, developer=developer, created_by=created_by, project_id=project_id)
@@ -1254,18 +1334,38 @@ def assist_with_rules(
     log_violations: bool = True,
     llm_fallback_confirmed: bool = False,
 ) -> dict[str, Any]:
-    wizard_response = _maybe_handle_wizard_assist(
-        query=query,
-        developer=developer,
-        created_by=created_by,
-        project_id=project_id,
-    )
-    if wizard_response is not None:
-        return wizard_response
+    request_mode = _classify_assist_request_mode(query)
+    if request_mode == "wizard":
+        wizard_response = _maybe_handle_wizard_assist(
+            query=query,
+            developer=developer,
+            created_by=created_by,
+            project_id=project_id,
+        )
+        if wizard_response is not None:
+            return wizard_response
+    elif request_mode == "explain":
+        return explain_abap_code(
+            code=code,
+            object_name=object_name,
+            developer=developer,
+            created_by=created_by,
+            project_id=project_id,
+        )
 
     rule_rows = _load_rule_rows(project_id=project_id, pack_name=pack_name, created_by=created_by)
     resolved = [rule for row in rule_rows if (rule := _resolve_rule(row)) is not None]
-    is_validate = _is_validation_query(query)
+    is_validate = request_mode == "validation"
+    if is_validate and not any(rule.rule_type in {"code", "design"} for rule in resolved):
+        # Validation must not be blocked by user-scoped wizard/template-only packs.
+        shared_rows = _load_rule_rows(project_id=project_id, pack_name=pack_name, created_by=None)
+        merged: dict[str, ResolvedRule] = {rule.rule_id: rule for rule in resolved}
+        for row in shared_rows:
+            rule = _resolve_rule(row)
+            if rule is None:
+                continue
+            merged.setdefault(rule.rule_id, rule)
+        resolved = list(merged.values())
 
     ranked, relevance_scores = _rank_rules(
         query,
@@ -1276,7 +1376,8 @@ def assist_with_rules(
     merged = ranked
 
     retrieved = merged[: max(1, min(top_k, 10))]
-    violations = _validate_code(code, resolved) if is_validate else []
+    validation_rules = [rule for rule in resolved if rule.rule_type in {"code", "design"}]
+    violations = _validate_code(code, validation_rules) if is_validate else []
     logged = 0
     if log_violations and violations:
         logged = _log_violations_to_dashboard(
@@ -1287,12 +1388,21 @@ def assist_with_rules(
         )
 
     # Validation flow must stay on rule retrieval + code checks, never template/wizard suggestion mode.
-    wants_template = (not is_validate) and _is_template_or_wizard_request(query)
+    wants_template = request_mode == "template"
     if wants_template:
-        template_pool = [r for r in retrieved if r.rule_type in {"template", "wizard"}]
+        explicit_wizard_request = _is_explicit_wizard_request(query)
+        allowed_types = {"template", "wizard"} if explicit_wizard_request else {"template"}
+        template_pool = [r for r in retrieved if r.rule_type in allowed_types]
         if not template_pool:
-            template_pool = [r for r in resolved if r.rule_type in {"template", "wizard"}]
+            template_pool = [r for r in resolved if r.rule_type in allowed_types]
+        if not template_pool and created_by:
+            # If user-scoped discovery has no template hit, fallback to shared governance assets.
+            shared_rows = _load_rule_rows(project_id=project_id, pack_name=pack_name, created_by=None)
+            shared_resolved = [rule for row in shared_rows if (rule := _resolve_rule(row)) is not None]
+            template_pool = [r for r in shared_resolved if r.rule_type in allowed_types]
         suggestions = _build_suggestions_for_query(query, template_pool, top_k=min(3, top_k))
+        if not explicit_wizard_request:
+            suggestions["wizards"] = []
     else:
         suggestions = {"templates": [], "wizards": []}
 
@@ -1429,14 +1539,19 @@ def explain_abap_code(
         "7. Summary in One Paragraph\n"
         "   - A short executive-level explanation of what this code does.\n\n"
         "Here is the ABAP code:\n"
-        f"{cleaned_code}"
     )
+    max_code_chars = 24000
+    prompt_code = cleaned_code
+    if len(prompt_code) > max_code_chars:
+        prompt_code = prompt_code[:max_code_chars]
+        prompt_code += "\n\n\" [Truncated for response-time optimization]"
+
     messages = [
         {
             "role": "system",
             "content": "You are a senior SAP solution architect specializing in ABAP and business process design.",
         },
-        {"role": "user", "content": explain_prompt},
+        {"role": "user", "content": explain_prompt + prompt_code},
     ]
 
     try:

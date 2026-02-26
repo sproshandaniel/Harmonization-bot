@@ -7,6 +7,7 @@ from app.services.store_service import (
     clear_all_fixed_dashboard_violations,
     clear_dashboard_violations_by_date_range,
     create_dashboard_violation,
+    dashboard_violation_exists,
     delete_dashboard_violation,
     get_dashboard_overview,
     get_managed_developers_for_architect,
@@ -74,6 +75,23 @@ def create_dashboard_violation_route(payload: DashboardViolationIn, request: Req
     )
 
 
+@router.get("/dashboard/violations/exists")
+def dashboard_violation_exists_route(
+    request: Request,
+    object_name: str = Query(..., min_length=1),
+    statuses: str | None = Query(default=None),
+):
+    user = get_request_user(request)
+    status_list = [item.strip() for item in str(statuses or "").split(",") if item.strip()]
+    return {
+        "exists": dashboard_violation_exists(
+            object_name=object_name,
+            developer=user,
+            statuses=status_list or None,
+        )
+    }
+
+
 @router.delete("/dashboard/violations/clear-fixed")
 def clear_fixed_dashboard_violations_route():
     deleted = clear_all_fixed_dashboard_violations()
@@ -98,4 +116,3 @@ def clear_dashboard_violations_route(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"deleted": deleted, "start_date": start_date, "end_date": end_date}
-

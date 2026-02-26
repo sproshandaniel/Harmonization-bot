@@ -6,6 +6,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+_DOC_META_PATTERN = re.compile(r"^<!--\s*([a-zA-Z0-9_]+)\s*:\s*(.*?)\s*-->$")
+
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -69,6 +71,51 @@ def _extract_changed_blocks(code: str, max_lines: int = 40) -> str:
     return "\n".join(lines[:max_lines])
 
 
+def _derive_change_summary(code: str) -> str:
+    lines = [line.strip() for line in (code or "").splitlines() if line.strip()]
+    if not lines:
+        return "No active code lines were available in the editor."
+    declared = [ln for ln in lines if ln.lower().startswith("data")]
+    has_try = any(ln.upper().startswith("TRY") for ln in lines)
+    has_catch = any(ln.upper().startswith("CATCH") for ln in lines)
+    has_assignment = any("=" in ln and not ln.upper().startswith(("TRY", "CATCH", "ENDTRY")) for ln in lines)
+
+    summary_parts: list[str] = []
+    if declared:
+        summary_parts.append("Added or updated local variable declarations.")
+    if has_assignment:
+        summary_parts.append("Updated arithmetic/assignment logic in the implementation block.")
+    if has_try or has_catch:
+        summary_parts.append("Wrapped arithmetic logic in exception handling to guard runtime overflow.")
+    if not summary_parts:
+        summary_parts.append("Updated ABAP implementation logic in the current editor object.")
+    return " ".join(summary_parts)
+
+
+def _derive_pseudocode(code: str) -> str:
+    lines = [line.strip() for line in (code or "").splitlines() if line.strip()]
+    if not lines:
+        return "- Read current editor code\n- Identify changed statements\n- Apply logic changes\n- Handle runtime exceptions where required"
+    pseudo: list[str] = []
+    for ln in lines[:20]:
+        upper = ln.upper()
+        if upper.startswith("DATA"):
+            pseudo.append("- Declare working variables")
+        elif upper.startswith("TRY"):
+            pseudo.append("- Start protected execution block")
+        elif upper.startswith("CATCH"):
+            pseudo.append("- Catch arithmetic overflow and prevent dump")
+        elif upper.startswith("ENDTRY"):
+            pseudo.append("- End protected execution block")
+        elif "=" in ln:
+            pseudo.append(f"- Compute and assign value: `{ln.rstrip('.')}`")
+    deduped: list[str] = []
+    for item in pseudo:
+        if item not in deduped:
+            deduped.append(item)
+    return "\n".join(deduped) if deduped else "- Apply implementation changes based on current editor code"
+
+
 def _fallback_doc(
     object_name: str,
     code: str,
@@ -76,12 +123,20 @@ def _fallback_doc(
     validation_summary: str | None = None,
 ) -> str:
     changed = _extract_changed_blocks(code)
+    resolved_summary = (change_summary or "").strip() or _derive_change_summary(code)
+    pseudocode = _derive_pseudocode(code)
     return "\n".join(
         [
             f"# Technical Design: {object_name}",
             "",
             "## Purpose",
-            change_summary or "Describe business purpose and reason for change.",
+            resolved_summary,
+            "",
+            "## Short Change Summary",
+            resolved_summary,
+            "",
+            "## Pseudocode of Changes",
+            pseudocode,
             "",
             "## Changed Components",
             f"- Object: `{object_name}`",
@@ -123,23 +178,67 @@ def _llm_generate(
 
     model = get_ai_model_name(default="gpt-4o-mini")
     prompt = f"""
-You are a senior SAP ABAP technical writer.
+Act as a senior SAP technical architect and documentation specialist.
 
 Task mode: {mode}
 
-Rules:
-- Output only the final technical document in Markdown.
-- Be precise and grounded only in provided inputs.
-- If information is missing, write "Needs confirmation:" for that detail.
-- Keep sections concise and practical.
+Generate COMPLETE technical documentation in Markdown with exactly these sections:
 
-Required sections:
-1) Purpose
-2) Technical Design
-3) Changed Components
-4) Data/Interface Impact
-5) Validation and Testing
-6) Risks and Rollback
+====================================================================
+1. PURPOSE OF CHANGE
+====================================================================
+
+Include implementation-aligned detail:
+- Business problem being solved
+- Technical objective
+- Scope of processing
+- Data objects involved (tables, structures, infotypes, function modules, classes)
+- Control logic overview
+- Impact on existing functionality
+- Data consistency implications
+- Performance considerations
+- Risk considerations
+- Output/result of the program
+
+====================================================================
+2. DETAILED TEXT FLOWCHART (Step-by-Step Execution Logic)
+====================================================================
+
+Use explicit control-flow text with this style:
+START
+  ↓
+Step
+  ↓
+Decision? (condition)
+  ├─ YES → Action
+  └─ NO  → Action
+  ↓
+Next step
+
+Mandatory in flowchart:
+- Cover each SELECT, LOOP, GROUP BY, IF/ELSEIF/ELSE, CHECK
+- Cover CALL FUNCTION and method calls
+- Cover DELETE/UPDATE/INSERT and COMMIT WORK
+- Cover exception handling and SY-SUBRC checks
+- Expand nested loops hierarchically
+- Show counter increments, continue/return/exit paths, and error branches
+- Separate DB reads from DB writes
+- Do not summarize or skip minor conditions
+
+====================================================================
+3. GRAPHICAL FLOWCHART (Mermaid Diagram)
+====================================================================
+
+Provide a Mermaid flowchart representing the same logic as the text flowchart:
+- Include Start/End, loops, decisions, DB operations, function calls, write operations
+- Include YES/NO decision branches
+- Ensure loops reconnect properly and nested loops are traceable
+- Do not omit branches
+
+Rules:
+- Use exact SAP object names from input
+- Avoid hallucinations; if assumptions are needed, state them explicitly
+- Ground every statement in the provided code/context
 
 Context:
 - Object Name: {object_name}
@@ -147,7 +246,7 @@ Context:
 - Change Summary: {change_summary or ""}
 - Validation Summary: {validation_summary or ""}
 
-Current ABAP code:
+ABAP OBJECT:
 ```abap
 {code or ""}
 ```
@@ -234,6 +333,78 @@ def enrich_technical_doc(
     }
 
 
+
+def _read_doc_payload(path: Path) -> dict[str, Any] | None:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except Exception:
+        return None
+
+    metadata: dict[str, str] = {}
+    lines = raw.splitlines()
+    content_start = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            content_start = i + 1
+            continue
+        match = _DOC_META_PATTERN.match(stripped)
+        if not match:
+            content_start = i
+            break
+        metadata[match.group(1).strip().lower()] = match.group(2).strip()
+        content_start = i + 1
+
+    body = "\n".join(lines[content_start:]).strip()
+    file_match = re.search(r"(doc-[a-f0-9]{10})\.md$", path.name)
+    doc_id = metadata.get("doc_id") or (file_match.group(1) if file_match else "")
+    saved_at = metadata.get("saved_at_utc")
+    if not saved_at:
+        saved_at = dt.datetime.utcfromtimestamp(path.stat().st_mtime).isoformat() + "Z"
+
+    return {
+        "doc_id": doc_id,
+        "title": metadata.get("title") or "Technical Design",
+        "object_name": metadata.get("object_name") or "ADT_OBJECT",
+        "developer": metadata.get("developer") or "",
+        "project_id": metadata.get("project_id") or "",
+        "saved_at_utc": saved_at,
+        "saved_path": str(path),
+        "document": body,
+    }
+
+
+def _value_matches(candidate: str, expected: str | None) -> bool:
+    if expected is None or not expected.strip():
+        return True
+    return (candidate or "").strip().lower() == expected.strip().lower()
+
+
+def load_latest_technical_doc(
+    *,
+    object_name: str | None = None,
+    developer: str | None = None,
+    project_id: str | None = None,
+) -> dict[str, Any] | None:
+    target_dir = BASE_DIR / "data" / "technical_docs"
+    if not target_dir.exists():
+        return None
+
+    files = sorted(target_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for path in files:
+        payload = _read_doc_payload(path)
+        if payload is None:
+            continue
+        if not _value_matches(str(payload.get("object_name") or ""), object_name):
+            continue
+        if not _value_matches(str(payload.get("project_id") or ""), project_id):
+            continue
+        if not _value_matches(str(payload.get("developer") or ""), developer):
+            continue
+        if not str(payload.get("document") or "").strip():
+            continue
+        return payload
+    return None
 def save_technical_doc(
     *,
     title: str,
@@ -254,6 +425,7 @@ def save_technical_doc(
 
     header = "\n".join(
         [
+            f"<!-- doc_id: {doc_id} -->",
             f"<!-- title: {title or 'Technical Design'} -->",
             f"<!-- object_name: {object_name or 'ADT_OBJECT'} -->",
             f"<!-- developer: {developer or 'unknown'} -->",

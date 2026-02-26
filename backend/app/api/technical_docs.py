@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.api.auth_context import get_request_user
@@ -8,6 +8,7 @@ from app.services.technical_doc_service import (
     enrich_technical_doc,
     generate_technical_doc,
     save_technical_doc,
+    load_latest_technical_doc,
 )
 
 router = APIRouter()
@@ -69,6 +70,25 @@ class SaveDocIn(BaseModel):
     object_name: str = "ADT_OBJECT"
     developer: str | None = None
     project_id: str | None = None
+
+
+@router.get("/docs/latest")
+def docs_latest(
+    request: Request,
+    object_name: str | None = Query(default=None),
+    project_id: str | None = Query(default=None),
+    developer: str | None = Query(default=None),
+):
+    user = get_request_user(request)
+    effective_developer = developer or user
+    result = load_latest_technical_doc(
+        object_name=object_name,
+        project_id=project_id,
+        developer=effective_developer,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="No matching technical document found")
+    return result
 
 
 @router.post("/docs/save")

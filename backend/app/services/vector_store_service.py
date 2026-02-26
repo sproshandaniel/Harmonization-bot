@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 from pathlib import Path
 from typing import Any
 import uuid
@@ -15,6 +16,22 @@ EMBEDDING_DIM = 1536
 _client: QdrantClient | None = None
 
 
+def _close_client() -> None:
+    global _client
+    client = _client
+    _client = None
+    if client is None:
+        return
+    try:
+        client.close()
+    except Exception:
+        # Best-effort cleanup on interpreter shutdown.
+        pass
+
+
+atexit.register(_close_client)
+
+
 def _get_client() -> QdrantClient:
     global _client
     if _client is not None:
@@ -23,15 +40,22 @@ def _get_client() -> QdrantClient:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     client = QdrantClient(path=str(QDRANT_PATH))
 
-    collections = {item.name for item in client.get_collections().collections}
-    if COLLECTION_NAME not in collections:
-        client.create_collection(
-            collection_name=COLLECTION_NAME,
-            vectors_config=qmodels.VectorParams(
-                size=EMBEDDING_DIM,
-                distance=qmodels.Distance.COSINE,
-            ),
-        )
+    try:
+        collections = {item.name for item in client.get_collections().collections}
+        if COLLECTION_NAME not in collections:
+            client.create_collection(
+                collection_name=COLLECTION_NAME,
+                vectors_config=qmodels.VectorParams(
+                    size=EMBEDDING_DIM,
+                    distance=qmodels.Distance.COSINE,
+                ),
+            )
+    except Exception:
+        try:
+            client.close()
+        except Exception:
+            pass
+        raise
 
     _client = client
     return client

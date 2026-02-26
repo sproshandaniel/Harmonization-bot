@@ -19,6 +19,7 @@ from openai import OpenAI
 from app.services.store_service import (
     get_ai_model_name,
     get_duplicate_similarity_threshold,
+    is_persisted_rule_id,
     get_model_api_key,
     log_llm_usage_event,
 )
@@ -1197,6 +1198,29 @@ async def extract_rules_pipeline(
 
     client = _get_openai_client()
     if client is None:
+        if normalized_rule_type == "template":
+            local_template = _normalize_template_rule(
+                {
+                    "type": "template",
+                    "confidence": 0.95,
+                    "template": {
+                        "language": "ABAP",
+                        "snippet": str(raw_text or "").strip(),
+                    },
+                },
+                idx=1,
+                raw_text=raw_text,
+            )
+            local_yaml = _safe_rule_yaml(local_template)
+            local_yaml = _ensure_template_snippet_yaml(local_yaml, raw_text)
+            return [
+                {
+                    "yaml": local_yaml,
+                    "confidence": float(local_template.get("confidence", 0.95)),
+                    "duplicate_of": None,
+                    "similarity": None,
+                }
+            ]
         fallback_yaml = """id: abap.generic.rule
 type: code
 title: Extraction failed
@@ -1251,16 +1275,31 @@ confidence: 0.2
             rule_objects = _filter_grounded_code_rules(rule_objects, raw_text=raw_text)
 
         if not rule_objects:
-            if normalized_rule_type in {"wizard", "template"}:
-                fallback_yaml = f"""id: rule.{normalized_rule_type}.fallback
+            if normalized_rule_type == "template":
+                local_template = _normalize_template_rule(
+                    {
+                        "type": "template",
+                        "confidence": 0.95,
+                        "template": {
+                            "language": "ABAP",
+                            "snippet": str(raw_text or "").strip(),
+                        },
+                    },
+                    idx=1,
+                    raw_text=raw_text,
+                )
+                rule_objects = [local_template]
+            else:
+                if normalized_rule_type in {"wizard", "template"}:
+                    fallback_yaml = f"""id: rule.{normalized_rule_type}.fallback
 type: {normalized_rule_type}
 title: Fallback extraction rule
 severity: MAJOR
 description: LLM returned unparsable output; please refine input and retry.
 confidence: 0.3
 """
-            else:
-                fallback_yaml = f"""id: rule.{normalized_rule_type}.fallback
+                else:
+                    fallback_yaml = f"""id: rule.{normalized_rule_type}.fallback
 type: {normalized_rule_type}
 title: Fallback extraction rule
 severity: MAJOR
@@ -1268,14 +1307,14 @@ description: LLM returned unparsable output; please refine input and retry.
 message: "Rule extraction failed: unparsable model output. Refine input and retry."
 confidence: 0.3
 """
-            return [
-                {
-                    "yaml": fallback_yaml,
-                    "confidence": 0.3,
-                    "duplicate_of": None,
-                    "similarity": None,
-                }
-            ]
+                return [
+                    {
+                        "yaml": fallback_yaml,
+                        "confidence": 0.3,
+                        "duplicate_of": None,
+                        "similarity": None,
+                    }
+                ]
 
         results: list[dict[str, Any]] = []
         duplicate_threshold = get_duplicate_similarity_threshold(default=0.9)
@@ -1319,6 +1358,10 @@ confidence: 0.3
                     },
                 )
             duplicate_id, similarity = find_duplicate_rule(embedding, threshold=duplicate_threshold)
+            # Ignore vector-only hits that are not actually persisted governance rules.
+            # This prevents false "already exists" after users discard extracted cards.
+            if duplicate_id and not is_persisted_rule_id(duplicate_id):
+                duplicate_id, similarity = None, None
             new_id = str(rule_obj.get("id") or f"rule.{abs(hash(rule_yaml)) % (10**10)}")
             upsert_rule_vector(
                 rule_id=new_id,

@@ -87,6 +87,8 @@ LLM_PRICING_USD_PER_1M: dict[str, tuple[float, float]] = {
     "text-embedding-3-large": (0.13, 0.0),
 }
 
+OPEN_DASHBOARD_VIOLATION_STATUSES = {"not fixed", "released without documentation"}
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -133,6 +135,24 @@ def _normalize_created_at_value(value: str | None) -> str:
         if normalized_day:
             return f"{normalized_day}T00:00:00+00:00"
         return _now_iso()
+
+
+def _normalize_dashboard_status(value: str | None) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized == "fixed":
+        return "Fixed"
+    if normalized in {
+        "released without documentation",
+        "released_without_documentation",
+        "released-without-documentation",
+        "released without doc",
+    }:
+        return "Released without documentation"
+    return "Not Fixed"
+
+
+def _dashboard_status_is_open(value: str | None) -> bool:
+    return str(value or "").strip().lower() in OPEN_DASHBOARD_VIOLATION_STATUSES
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -301,6 +321,12 @@ def _init_db() -> None:
             UPDATE dashboard_violations
             SET status = CASE
                 WHEN LOWER(COALESCE(status, '')) = 'fixed' THEN 'Fixed'
+                WHEN LOWER(COALESCE(status, '')) IN (
+                    'released without documentation',
+                    'released_without_documentation',
+                    'released-without-documentation',
+                    'released without doc'
+                ) THEN 'Released without documentation'
                 ELSE 'Not Fixed'
             END
             """
@@ -569,6 +595,28 @@ def add_rule_for_project(
             developer=created_by,
             severity=str(derived["severity"]),
         )
+
+
+def is_persisted_rule_id(rule_id: str) -> bool:
+    """
+    Returns True only for rules that are actually persisted/active in governance storage.
+    This intentionally excludes extracted/discarded transient cards.
+    """
+    rid = str(rule_id or "").strip()
+    if not rid:
+        return False
+    with _get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM rules
+            WHERE rule_id = ?
+              AND LOWER(COALESCE(status, '')) IN ('saved', 'approved', 'edited')
+            LIMIT 1
+            """,
+            (rid,),
+        ).fetchone()
+    return row is not None
 
 
 def _insert_rule_for_project(
@@ -2249,7 +2297,7 @@ def create_dashboard_violation(
     severity: str,
     status: str = "Not Fixed",
 ) -> dict[str, str]:
-    normalized_status = "Fixed" if str(status or "").strip().lower() == "fixed" else "Not Fixed"
+    normalized_status = _normalize_dashboard_status(status)
     incoming_transport = _normalize_transport_value(transport)
     row = {
         "id": f"vio-{uuid.uuid4().hex[:12]}",
@@ -2267,7 +2315,7 @@ def create_dashboard_violation(
                 """
                 UPDATE dashboard_violations
                 SET status = 'Fixed', created_at = ?
-                WHERE object_name = ? AND developer = ? AND LOWER(status) <> 'fixed'
+                WHERE object_name = ? AND developer = ? AND LOWER(status) IN ('not fixed', 'released without documentation')
                 """,
                 (row["created_at"], row["object_name"], row["developer"]),
             ).rowcount
@@ -2283,16 +2331,36 @@ def create_dashboard_violation(
                 "updated": str(int(updated or 0)),
             }
 
-        existing = conn.execute(
-            """
-            SELECT id, transport
-            FROM dashboard_violations
-            WHERE object_name = ? AND developer = ? AND LOWER(status) = 'not fixed'
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            (row["object_name"], row["developer"]),
-        ).fetchone()
+        if normalized_status == "Released without documentation":
+            existing = conn.execute(
+                """
+                SELECT id, transport
+                FROM dashboard_violations
+                WHERE object_name = ? AND developer = ?
+                  AND LOWER(status) IN ('fixed', 'not fixed', 'released without documentation')
+                ORDER BY
+                    CASE LOWER(status)
+                        WHEN 'fixed' THEN 0
+                        WHEN 'not fixed' THEN 1
+                        WHEN 'released without documentation' THEN 2
+                        ELSE 3
+                    END,
+                    created_at DESC
+                LIMIT 1
+                """,
+                (row["object_name"], row["developer"]),
+            ).fetchone()
+        else:
+            existing = conn.execute(
+                """
+                SELECT id, transport
+                FROM dashboard_violations
+                WHERE object_name = ? AND developer = ? AND LOWER(status) IN ('not fixed', 'released without documentation')
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (row["object_name"], row["developer"]),
+            ).fetchone()
         if existing:
             row["id"] = str(existing["id"])
             existing_transport = _normalize_transport_value(str(existing["transport"] or ""))
@@ -2301,13 +2369,14 @@ def create_dashboard_violation(
             conn.execute(
                 """
                 UPDATE dashboard_violations
-                SET rule_pack = ?, transport = ?, severity = ?, status = 'Not Fixed', created_at = ?
+                SET rule_pack = ?, transport = ?, severity = ?, status = ?, created_at = ?
                 WHERE id = ?
                 """,
                 (
                     row["rule_pack"],
                     row["transport"],
                     row["severity"],
+                    row["status"],
                     row["created_at"],
                     row["id"],
                 ),
@@ -2340,6 +2409,37 @@ def delete_dashboard_violation(violation_id: str) -> bool:
             (violation_id,),
         )
         return cur.rowcount > 0
+
+
+def dashboard_violation_exists(
+    object_name: str,
+    developer: str,
+    statuses: list[str] | None = None,
+) -> bool:
+    object_key = str(object_name or "").strip()
+    developer_key = str(developer or "").strip()
+    if not object_key or not developer_key:
+        return False
+
+    normalized_statuses = [
+        str(item or "").strip().lower()
+        for item in (statuses or [])
+        if str(item or "").strip()
+    ]
+
+    with _get_conn() as conn:
+        sql = """
+            SELECT COUNT(*) AS c
+            FROM dashboard_violations
+            WHERE object_name = ? AND developer = ?
+        """
+        params: list[Any] = [object_key, developer_key]
+        if normalized_statuses:
+            placeholders = ",".join("?" for _ in normalized_statuses)
+            sql += f" AND LOWER(COALESCE(status, '')) IN ({placeholders})"
+            params.extend(normalized_statuses)
+        row = conn.execute(sql, tuple(params)).fetchone()
+    return bool(int(row["c"] or 0) > 0) if row else False
 
 
 def clear_dashboard_violations_by_date_range(start_date: str, end_date: str) -> int:
@@ -2407,7 +2507,7 @@ def get_dashboard_overview(
                     SELECT COUNT(*) FROM dashboard_violations
                     WHERE created_at LIKE ?
                       AND LOWER(developer) IN ({placeholders})
-                      AND LOWER(COALESCE(status, 'not fixed')) = 'not fixed'
+                      AND LOWER(COALESCE(status, 'not fixed')) IN ('not fixed', 'released without documentation')
                     """,
                     (f"{today}%", *scoped_developers),
                 ).fetchone()[0]
@@ -2418,7 +2518,7 @@ def get_dashboard_overview(
                 FROM dashboard_violations
                 WHERE date(created_at) >= date('now', '-6 day')
                   AND LOWER(developer) IN ({placeholders})
-                  AND LOWER(COALESCE(status, 'not fixed')) = 'not fixed'
+                  AND LOWER(COALESCE(status, 'not fixed')) IN ('not fixed', 'released without documentation')
                 GROUP BY day
                 ORDER BY day
                 """,
@@ -2441,7 +2541,7 @@ def get_dashboard_overview(
                     SELECT COUNT(*) FROM dashboard_violations
                     WHERE created_at LIKE ?
                       AND developer = ?
-                      AND LOWER(COALESCE(status, 'not fixed')) = 'not fixed'
+                      AND LOWER(COALESCE(status, 'not fixed')) IN ('not fixed', 'released without documentation')
                     """,
                     (f"{today}%", created_by),
                 ).fetchone()[0]
@@ -2452,7 +2552,7 @@ def get_dashboard_overview(
                 FROM dashboard_violations
                 WHERE date(created_at) >= date('now', '-6 day')
                   AND developer = ?
-                  AND LOWER(COALESCE(status, 'not fixed')) = 'not fixed'
+                  AND LOWER(COALESCE(status, 'not fixed')) IN ('not fixed', 'released without documentation')
                 GROUP BY day
                 ORDER BY day
                 """,
@@ -2474,7 +2574,7 @@ def get_dashboard_overview(
                     """
                     SELECT COUNT(*) FROM dashboard_violations
                     WHERE created_at LIKE ?
-                      AND LOWER(COALESCE(status, 'not fixed')) = 'not fixed'
+                      AND LOWER(COALESCE(status, 'not fixed')) IN ('not fixed', 'released without documentation')
                     """,
                     (f"{today}%",),
                 ).fetchone()[0]
@@ -2484,7 +2584,7 @@ def get_dashboard_overview(
                 SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS count
                 FROM dashboard_violations
                 WHERE date(created_at) >= date('now', '-6 day')
-                  AND LOWER(COALESCE(status, 'not fixed')) = 'not fixed'
+                  AND LOWER(COALESCE(status, 'not fixed')) IN ('not fixed', 'released without documentation')
                 GROUP BY day
                 ORDER BY day
                 """
@@ -2748,7 +2848,7 @@ def compute_developer_analytics(
         """
         where_clauses: list[str] = []
         params: list[Any] = []
-        where_clauses.append("LOWER(COALESCE(status, 'not fixed')) = 'not fixed'")
+        where_clauses.append("LOWER(COALESCE(status, 'not fixed')) IN ('not fixed', 'released without documentation')")
         if created_by:
             where_clauses.append("developer = ?")
             params.append(created_by)
@@ -2910,7 +3010,7 @@ def compute_violation_analytics(
         """
         where_clauses: list[str] = []
         params: list[Any] = []
-        where_clauses.append("LOWER(COALESCE(status, 'not fixed')) = 'not fixed'")
+        where_clauses.append("LOWER(COALESCE(status, 'not fixed')) IN ('not fixed', 'released without documentation')")
         if created_by:
             where_clauses.append("developer = ?")
             params.append(created_by)
@@ -2997,7 +3097,7 @@ def list_analytics_developers(
         sql = "SELECT DISTINCT developer FROM dashboard_violations"
         where_clauses: list[str] = []
         params: list[Any] = []
-        where_clauses.append("LOWER(COALESCE(status, 'not fixed')) = 'not fixed'")
+        where_clauses.append("LOWER(COALESCE(status, 'not fixed')) IN ('not fixed', 'released without documentation')")
         if created_by:
             where_clauses.append("developer = ?")
             params.append(created_by)

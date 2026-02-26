@@ -85,6 +85,7 @@ class BotWizardStartIn(BaseModel):
     wizard_id: str | None = None
     project_id: str | None = None
     developer: str | None = None
+    force_restart: bool = False
 
 
 @router.post("/bot/wizard/start")
@@ -99,6 +100,7 @@ def bot_wizard_start(request: Request, payload: BotWizardStartIn | None = None):
         created_by=user,
         project_id=payload.project_id,
         wizard_id=payload.wizard_id,
+        force_restart=payload.force_restart,
     )
 
 
